@@ -15,7 +15,7 @@ const runtime = JSON.parse(fs.readFileSync(runtimePath, "utf8")) as { hostUrl: s
 
 test("catalogs real WAV, FLAC, AIFF, MP3, and OGG files and decodes WAV and FLAC", async ({ page }) => {
   test.skip(process.env.ZURADIO_FORMAT_FIXTURES !== "1", "sox and flac are required for generated format fixtures");
-  await page.goto(runtime.hostUrl);
+  await page.goto(`${runtime.hostUrl}&autobroadcast=0`);
 
   const result = await page.evaluate(async () => {
     const response = await fetch("/api/v1/snapshot");

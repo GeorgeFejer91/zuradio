@@ -1,4 +1,9 @@
 #!/bin/sh
 set -eu
 
+native_desktop="$HOME/.local/lib/zuradio/zuradio-desktop"
+if [ -x "$native_desktop" ]; then
+  exec "$native_desktop"
+fi
+
 exec "$HOME/.local/lib/zuradio/Zuradio.AppImage"

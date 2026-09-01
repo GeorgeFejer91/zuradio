@@ -5552,5 +5552,6 @@ dependencies = [
  "tokio-util",
  "tracing",
  "url",
+ "webkit2gtk",
  "zuradio-daemon",
 ]

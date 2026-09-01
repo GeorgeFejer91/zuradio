@@ -31,6 +31,7 @@ pub fn run() {
                     .min_inner_size(820.0, 560.0)
                     .on_navigation(move |url| is_allowed_navigation(url, &navigation_port))
                     .build()?;
+            enable_desktop_media_bridge(&window)?;
 
             let data_dir = zuradio_daemon::default_data_dir();
             let web_root = resolve_web_root(app)?;
@@ -93,6 +94,23 @@ pub fn run() {
                 exit_shutdown.cancel();
             }
         });
+}
+
+#[cfg(target_os = "linux")]
+fn enable_desktop_media_bridge(window: &WebviewWindow) -> tauri::Result<()> {
+    window.with_webview(|webview| {
+        use webkit2gtk::{SettingsExt, WebViewExt};
+
+        if let Some(settings) = webview.inner().settings() {
+            settings.set_enable_webaudio(true);
+            settings.set_enable_webrtc(true);
+        }
+    })
+}
+
+#[cfg(not(target_os = "linux"))]
+fn enable_desktop_media_bridge(_window: &WebviewWindow) -> tauri::Result<()> {
+    Ok(())
 }
 
 async fn discover_running_host(data_dir: PathBuf) -> Option<String> {

@@ -23,7 +23,7 @@
     "targets": "all",
     "category": "Music",
     "shortDescription": "Local-first music player and private radio bridge",
-    "longDescription": "Zuradio turns a computer into a private music library, local player, and opt-in WebRTC radio source.",
+    "longDescription": "Zuradio turns a computer into a private music library, local player, and password-protected WebRTC radio source that broadcasts while the desktop app is open.",
     "copyright": "Copyright © 2026 George Fejer",
     "linux": {
       "appimage": {

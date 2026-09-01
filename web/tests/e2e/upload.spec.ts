@@ -97,14 +97,14 @@ test("selects a folder, ignores non-audio files, and imports every track", async
 
 async function authenticatedHost(browser: Browser): Promise<Page> {
   const page = await browser.newPage();
-  await page.goto(runtime.hostUrl);
+  await page.goto(`${runtime.hostUrl}&autobroadcast=0`);
   await expect(page.getByRole("heading", { name: "Zuradio", exact: true })).toBeVisible();
   return page;
 }
 
 async function startFreshBroadcast(host: Page): Promise<void> {
   await host.evaluate(() => fetch("/api/v1/broadcast/stop", { method: "POST" }));
-  await host.reload();
+  await host.goto(`${runtime.hostUrl.split("#")[0]}#autobroadcast=0`);
   await host.getByRole("button", { name: /Broadcast/ }).click();
   await host.getByTestId("start-broadcast").click();
   await expect(host.getByTestId("stop-broadcast")).toBeVisible({ timeout: 35_000 });

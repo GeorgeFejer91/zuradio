@@ -26,5 +26,8 @@ tracing.workspace = true
 url.workspace = true
 zuradio-daemon = { path = "../../../crates/zuradio-daemon" }
 
+[target.'cfg(target_os = "linux")'.dependencies]
+webkit2gtk = "2.0.2"
+
 [lints]
 workspace = true

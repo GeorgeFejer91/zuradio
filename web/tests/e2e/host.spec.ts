@@ -22,7 +22,7 @@ test.beforeEach(async ({ page }) => {
   page.on("console", (message) => {
     if (message.type() === "error") pageErrors.push(message.text());
   });
-  await page.goto(runtime.hostUrl);
+  await page.goto(`${runtime.hostUrl}&autobroadcast=0`);
   await expect(page.getByRole("heading", { name: "Zuradio", exact: true })).toBeVisible();
 });
 
@@ -200,7 +200,7 @@ test("moves and clears the queue", async ({ page }) => {
 test("starts password discovery without exposing invitation URLs and revokes it", async ({ page }) => {
   test.setTimeout(60_000);
   await page.evaluate(() => fetch("/api/v1/broadcast/stop", { method: "POST" }));
-  await page.reload();
+  await page.goto(`${runtime.baseUrl}/host/#autobroadcast=0`);
   await page.getByRole("button", { name: /Broadcast/ }).click();
   await page.getByTestId("start-broadcast").click();
   await expect(page.getByTestId("stop-broadcast")).toBeVisible({ timeout: 35_000 });
@@ -213,9 +213,20 @@ test("starts password discovery without exposing invitation URLs and revokes it"
   await expect(page.getByTestId("start-broadcast")).toBeVisible();
 });
 
+test("starts broadcasting automatically when the host opens", async ({ page }) => {
+  test.setTimeout(60_000);
+  await page.evaluate(() => fetch("/api/v1/broadcast/stop", { method: "POST" }));
+  await page.goto(`${runtime.baseUrl}/host/`);
+  await expect(page.getByRole("button", { name: /Broadcast On/ })).toBeVisible({ timeout: 35_000 });
+  await page.getByRole("button", { name: /Broadcast On/ }).click();
+  await expect(page.getByTestId("stop-broadcast")).toBeVisible({ timeout: 35_000 });
+  await page.getByTestId("stop-broadcast").click();
+  await expect(page.getByTestId("start-broadcast")).toBeVisible();
+});
+
 test("is keyboard reachable and responsive at phone width", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.reload();
+  await page.goto(`${runtime.baseUrl}/host/#autobroadcast=0`);
   await expect(page.getByTestId("search")).toBeVisible();
   await expect(page.getByRole("button", { name: "Shuffle" })).toBeVisible();
   await expect(page.locator('[aria-label^="Repeat mode:"]')).toBeVisible();

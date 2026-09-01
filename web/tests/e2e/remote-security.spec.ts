@@ -27,7 +27,7 @@ if (!passwordPath) throw new Error("ZURADIO_TEST_PASSWORD_FILE must name the dae
 const password = fs.readFileSync(passwordPath, "utf8").replace(/[\r\n]+$/, "");
 
 test("binds controller grants to proof, broadcast, peer, and monotonic sequence", async ({ page }) => {
-  await page.goto(runtime.hostUrl);
+  await page.goto(`${runtime.hostUrl}&autobroadcast=0`);
   await expect(page.getByRole("heading", { name: "Zuradio", exact: true })).toBeVisible();
   await post(page, "/api/v1/broadcast/stop", undefined);
   const started = await post(page, "/api/v1/broadcast/start", undefined);

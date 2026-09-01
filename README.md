@@ -3,8 +3,9 @@
 Zuradio turns one laptop into a private music library, local player, and live
 radio source. The Rust service owns the catalog, queue, playlists, favorites,
 history, authorization, and every state change. **Zuradio Web Companion** is a
-static phone-friendly listener/controller that connects to a broadcast started
-on the laptop.
+static phone-friendly listener/controller that connects to the laptop's active
+broadcast. The installed desktop shell starts a fresh broadcast automatically
+on every launch.
 
 Music is never uploaded to or hosted by the companion site. GitHub Pages ships
 only about 180 KiB of HTML, CSS, and JavaScript. While broadcasting, the laptop
@@ -25,8 +26,9 @@ the stream unavailable.
 - A loopback-only local web player, installed as a hardened systemd user
   service on Linux, plus a Tauri v2 desktop shell with no WebView IPC
   permissions and the bundle identifier `com.georgefejer.zuradio`.
-- Explicit Start/Stop Broadcast controls and password-discovered, separately
-  scoped Listen, Control, and Upload modes with no invitation URLs.
+- Default-on broadcasting from the installed desktop shell, explicit Start/Stop
+  controls, and password-discovered, separately scoped Listen, Control, and
+  Upload modes with no invitation URLs.
 - A read-only listener UI, a controller UI with player, queue, favorite, and
   playlist controls, and a folder/file upload UI that writes directly to this
   laptop rather than GitHub Pages.
@@ -131,9 +133,9 @@ and 16 GiB per batch. See [the upload protocol](docs/upload-protocol.md).
 
 ## Broadcast to a phone
 
-1. Open Zuradio on the laptop and select a track.
-2. Open **Broadcast** and choose **Start broadcast**. This explicit local gesture
-   unlocks audio capture and creates fresh credentials.
+1. Open Zuradio on the laptop. The desktop shell rotates any stale session,
+   unlocks its audio graph, and starts broadcasting automatically.
+2. Select a track locally or from an authenticated Control connection.
 3. Open the Zuradio Web Companion on a phone and tap **Listen**, **Control**, or
    **Upload**. The site prompts for the shared password; no URL needs to be
    copied or pasted.
@@ -142,7 +144,8 @@ and 16 GiB per batch. See [the upload protocol](docs/upload-protocol.md).
    accepts files or folders for the managed laptop repository. Rust grants only
    the selected mode after mutual proof.
 5. Choose **Stop broadcast** to close peers, discard partial uploads, and revoke
-   the complete broadcast epoch.
+   the complete broadcast epoch. It stays stopped until manually restarted or
+   the desktop app is launched again.
 
 The password derives only a deterministic, data-only rendezvous route. The
 laptop returns fresh private session coordinates over the exact requester-bound

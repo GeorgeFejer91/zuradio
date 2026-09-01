@@ -127,25 +127,31 @@ export class HostBroadcastBridge {
       rendezvous.joinRoom({ room: session.rendezvousRoom, password: session.rendezvousTransportKey }),
       control.joinRoom({ room: session.controllerRoom, password: session.controllerTransportKey }),
     ]);
-    await listen.publish(stream, {
-      room: session.listenRoom,
-      streamID: session.listenStream,
-      password: session.listenTransportKey,
-      label: "Zuradio live audio",
-      media: { audio: { codec: "opus" } },
-    });
-    await control.announce({
-      room: session.controllerRoom,
-      streamID: session.controllerStream,
-      password: session.controllerTransportKey,
-      label: "Zuradio remote bridge",
-    });
-    await rendezvous.announce({
-      room: session.rendezvousRoom,
-      streamID: session.rendezvousStream,
-      password: session.rendezvousTransportKey,
-      label: "Zuradio password rendezvous",
-    });
+    await Promise.all([
+      control.announce({
+        room: session.controllerRoom,
+        streamID: session.controllerStream,
+        password: session.controllerTransportKey,
+        label: "Zuradio remote bridge",
+      }),
+      rendezvous.announce({
+        room: session.rendezvousRoom,
+        streamID: session.rendezvousStream,
+        password: session.rendezvousTransportKey,
+        label: "Zuradio password rendezvous",
+      }),
+    ]);
+    void listen
+      .publish(stream, {
+        room: session.listenRoom,
+        streamID: session.listenStream,
+        password: session.listenTransportKey,
+        label: "Zuradio live audio",
+        media: { audio: { codec: "opus" } },
+      })
+      .catch((error: unknown) => {
+        this.callbacks.onError(error instanceof Error ? error.message : "Live audio publication failed");
+      });
     this.publishState(this.callbacks.snapshot());
   }
 

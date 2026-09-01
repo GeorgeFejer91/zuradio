@@ -11,6 +11,7 @@ type View = "library" | "albums" | "artists" | "playlists" | "favorites" | "hist
 const rootElement = document.querySelector<HTMLDivElement>("#app");
 if (!rootElement) throw new Error("Missing app root");
 const root: HTMLDivElement = rootElement;
+const autoBroadcast = new URLSearchParams(location.hash.slice(1)).get("autobroadcast") !== "0";
 
 const api = new ZuradioApi();
 let snapshot: AppSnapshot | null = null;
@@ -122,9 +123,23 @@ async function initialize(): Promise<void> {
       render();
     });
     render();
+    if (autoBroadcast) {
+      await windowReady();
+      await task(async () => {
+        await activateBroadcast(true);
+        showMessage("Broadcast started automatically", false);
+      });
+    }
   } catch (error) {
     renderFatal(messageOf(error));
   }
+}
+
+async function windowReady(): Promise<void> {
+  if (document.readyState !== "complete") {
+    await new Promise<void>((resolve) => window.addEventListener("load", () => resolve(), { once: true }));
+  }
+  await new Promise<void>((resolve) => window.setTimeout(resolve, 250));
 }
 
 async function handleClick(target: HTMLElement): Promise<void> {
@@ -189,17 +204,8 @@ async function handleClick(target: HTMLElement): Promise<void> {
   }
   if (action === "start-broadcast") {
     await task(async () => {
-      await audio.unlock();
-      const session = await api.startBroadcast();
-      try {
-        await bridge.start(session, audio.broadcastStream);
-        broadcastSession = session;
-        showMessage("Broadcast started", false);
-      } catch (error) {
-        await api.stopBroadcast().catch(() => undefined);
-        throw error;
-      }
-      render();
+      await activateBroadcast(false);
+      showMessage("Broadcast started", false);
     });
     return;
   }
@@ -278,6 +284,28 @@ async function handleClick(target: HTMLElement): Promise<void> {
       }
       break;
   }
+}
+
+async function activateBroadcast(automatic: boolean): Promise<void> {
+  if (automatic) {
+    void audio.unlock().catch(() => undefined);
+  } else {
+    await audio.unlock();
+  }
+  if (automatic && broadcastSession) {
+    await bridge.stop();
+    await api.stopBroadcast();
+    broadcastSession = null;
+  }
+  const session = await api.startBroadcast();
+  try {
+    await bridge.start(session, audio.broadcastStream);
+    broadcastSession = session;
+  } catch (error) {
+    await api.stopBroadcast().catch(() => undefined);
+    throw error;
+  }
+  render();
 }
 
 async function saveMetadata(form: HTMLFormElement): Promise<void> {
@@ -528,13 +556,13 @@ function renderBroadcast(): string {
     return `<section class="broadcast-panel">
       <h2>Broadcast</h2>
       <div class="broadcast-status"><strong>Off</strong><p class="muted">No remote peer can hear or control this laptop.</p></div>
-      <p>Starting a broadcast makes this laptop discoverable from the Zuradio Web Companion after a listener enters the shared password. Music always stays on this laptop.</p>
+      <p>Starting a broadcast makes this laptop discoverable from the Zuradio Web Companion after a listener enters the shared password. The desktop app starts this automatically on launch. Music always stays on this laptop.</p>
       <button class="primary" data-action="start-broadcast" data-testid="start-broadcast" ${disabled()}>Start broadcast</button>
     </section>`;
   }
   return `<section class="broadcast-panel">
     <h2>Broadcast</h2>
-    <div class="broadcast-status live"><strong>Live</strong><p class="muted">Password discovery is active. Stopping revokes every connection and partial upload.</p></div>
+    <div class="broadcast-status live"><strong>Live</strong><p class="muted">Password discovery is active. Stopping revokes every connection and partial upload until the next manual start or app launch.</p></div>
     <button class="danger" data-action="stop-broadcast" data-testid="stop-broadcast" ${disabled()}>Stop broadcast</button>
     <div class="access-modes" data-testid="access-modes">
       <div><strong>Listen</strong><span>Live audio and current track</span></div>

@@ -23,10 +23,10 @@ test("streams from the laptop while enforcing listener and controller roles", as
   watch(host, "host", errors);
 
   try {
-    await host.goto(runtime.hostUrl);
+    await host.goto(`${runtime.hostUrl}&autobroadcast=0`);
     await expect(host.getByRole("heading", { name: "Zuradio", exact: true })).toBeVisible();
     await host.evaluate(() => fetch("/api/v1/broadcast/stop", { method: "POST" }));
-    await host.reload();
+    await host.goto(`${runtime.hostUrl.split("#")[0]}#autobroadcast=0`);
     await expect(host.locator("[data-track-row]")).toHaveCount(initialTrackCount);
     const hostRows = host.locator("[data-track-row]");
     const firstTitle = (await hostRows.nth(0).locator(".track-title strong").textContent()) ?? "";
@@ -171,6 +171,7 @@ test("streams from the laptop while enforcing listener and controller roles", as
     await pickerRows.nth(0).getByRole("button", { name: "Add", exact: true }).click();
     await pickerRows.nth(1).getByRole("button", { name: "Add", exact: true }).click();
     const closePicker = controller.getByRole("button", { name: "Close track picker", exact: true });
+    await closePicker.scrollIntoViewIfNeeded();
     const touchTarget = await closePicker.boundingBox();
     expect(touchTarget?.height ?? 0).toBeGreaterThanOrEqual(44);
     await closePicker.click();

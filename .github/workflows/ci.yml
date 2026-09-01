@@ -60,6 +60,37 @@ jobs:
             exit 1
           fi
 
+  browser-verification-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install the pinned Rust toolchain
+        run: rustup show
+      - name: Install locked browser dependencies
+        run: npm ci
+        working-directory: web
+      - name: Install Chromium runtime
+        run: npx playwright install --with-deps chromium
+        working-directory: web
+      - name: Build production web assets
+        run: npm run build
+        working-directory: web
+      - name: Build the optimized Rust daemon
+        run: cargo build --release -p zuradio-daemon --locked
+      - name: Download checksum-verified CC0 fixtures
+        run: scripts/fetch-test-music.sh
+      - name: Create an isolated test password
+        run: printf 'zuradio-ci-browser-password\n' > "$RUNNER_TEMP/zuradio-password.txt"
+      - name: Enforce the live browser completion gate
+        run: scripts/verify-feature-completion.sh
+        env:
+          ZURADIO_TEST_PASSWORD_FILE: ${{ runner.temp }}/zuradio-password.txt
+
   desktop:
     name: Desktop (${{ matrix.os }})
     strategy:
@@ -90,3 +121,10 @@ jobs:
         run: cargo clippy -p zuradio-desktop --all-targets --locked -- -D warnings
       - name: Build the host-native release binary
         run: cargo build -p zuradio-desktop --release --locked
+      - name: Publish the Linux desktop binary for installation verification
+        if: runner.os == 'Linux'
+        uses: actions/upload-artifact@v6
+        with:
+          name: zuradio-desktop-linux
+          path: target/release/zuradio-desktop
+          if-no-files-found: error

@@ -9,6 +9,10 @@ export default defineConfig({
   retries: 0,
   reporter: [["list"], ["html", { open: "never", outputFolder: "test-results/report" }]],
   use: {
+    launchOptions: {
+      // Tauri/Wry enables media autoplay for the packaged desktop WebView.
+      args: ["--autoplay-policy=no-user-gesture-required"],
+    },
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     video: "retain-on-failure",
