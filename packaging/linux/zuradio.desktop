@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=Zuradio
+GenericName=Music Player
+Comment=Play and privately stream music stored on this laptop
+Exec=@LAUNCHER@
+Icon=zuradio
+Terminal=false
+Categories=AudioVideo;Audio;Player;
+Keywords=music;player;radio;stream;playlist;
+StartupNotify=true

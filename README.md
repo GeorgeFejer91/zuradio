@@ -1,0 +1,165 @@
+# Zuradio
+
+Zuradio turns one laptop into a private music library, local player, and live
+radio source. The Rust service owns the catalog, queue, playlists, favorites,
+history, authorization, and every state change. **Zuradio Web Companion** is a
+static phone-friendly listener/controller that connects to a broadcast started
+on the laptop.
+
+Music is never uploaded to or hosted by the companion site. GitHub Pages ships
+only about 180 KiB of HTML, CSS, and JavaScript. While broadcasting, the laptop
+decodes the selected local file and publishes that same live audio through the
+official VDO.Ninja SDK/WebRTC path. Turning the laptop or broadcast off makes
+the stream unavailable.
+
+## What works
+
+- Recursive AAC, AIFF, ALAC, FLAC, M4A, MP3, MP4, OGG, Opus, WAV, and WebM
+  catalog scans with metadata and bounded embedded-artwork reads.
+- Search and browsing by library, album, artist, favorite, history, and
+  persistent ordered playlist.
+- One canonical queue with play, pause, stop, next, previous, seek, volume,
+  mute, shuffle with order restoration, and off/all/one repeat modes.
+- A complete CLI over the same typed Rust action model used by the UI.
+- A loopback-only local web player, installed as a hardened systemd user
+  service and desktop-menu launcher on Linux.
+- Explicit Start/Stop Broadcast controls and unrelated high-entropy listener
+  and controller invitations.
+- A read-only listener UI and an authenticated controller UI with player,
+  queue, favorite, and playlist controls.
+- Real WebRTC audio and data channels through `@vdoninja/sdk` 1.5.5. VDO.Ninja
+  transports packets; Rust independently proves and authorizes controllers.
+
+## Install on Linux
+
+Requirements are Rust, Node.js 22+, npm, a Chromium-class browser, systemd user
+services, and the normal desktop helpers (`xdg-open` and `xdg-user-dir`). No
+root access is required.
+
+```sh
+./scripts/install-local.sh
+```
+
+The installer performs locked web installation, TypeScript and unit checks, a
+production web build, Rust tests, and an optimized Rust build before replacing
+the installed files. It then installs:
+
+- `~/.local/bin/zuradio` and `~/.local/bin/zuradio-launch`;
+- `~/.local/lib/zuradio/` for the daemon and local UI;
+- `~/.config/systemd/user/zuradio.service`;
+- `~/.local/share/applications/zuradio.desktop`; and
+- private state under `~/.local/share/zuradio/`.
+
+Launch **Zuradio** from the application menu or run:
+
+```sh
+zuradio-launch
+```
+
+The service starts at login and binds to a random `127.0.0.1` port. Its runtime
+credential file is mode 0600. The browser exchanges a one-use fragment secret
+for an `HttpOnly`, `SameSite=Strict` cookie and erases the fragment.
+
+## Add music and use the CLI
+
+The installed service uses the desktop Music folder (on this machine,
+`~/Musik`). Put music there and press **Scan library**, or scan one or more
+folders from the CLI:
+
+```sh
+zuradio scan "$HOME/Musik"
+zuradio tracks
+zuradio tracks --query river
+zuradio status
+```
+
+Every player and collection mutation has a typed command. Track and playlist
+IDs are shown by `tracks`, `status`, and `playlist list`.
+
+```sh
+zuradio play TRACK_ID
+zuradio pause
+zuradio seek 45000
+zuradio volume 65
+zuradio mute true
+zuradio shuffle true
+zuradio repeat all
+zuradio queue add TRACK_ID
+zuradio queue move 2 0
+zuradio playlist create "Late night"
+zuradio playlist add PLAYLIST_ID TRACK_ID
+zuradio favorite TRACK_ID true
+```
+
+Run `zuradio --help` or a subcommand with `--help` for the complete surface.
+CLI commands control canonical Rust state. Audio output is produced by the open
+host UI, so the browser must be open and must have received a playback gesture
+before browser autoplay policy allows unattended CLI playback.
+
+## Broadcast to a phone
+
+1. Open Zuradio on the laptop and select a track.
+2. Open **Broadcast** and choose **Start broadcast**. This explicit local gesture
+   unlocks audio capture and creates fresh credentials.
+3. Send the listener invitation to people who may only hear the live stream and
+   see sanitized now-playing data.
+4. Send the controller invitation only to someone allowed to mutate player,
+   queue, favorites, and playlists.
+5. Choose **Stop broadcast** to close peers and revoke the complete broadcast
+   epoch. Old links cannot rejoin a later session.
+
+Invitation credentials live after `#` in the URL, so they are not sent in the
+HTTP request to GitHub Pages. The companion removes the fragment immediately
+and keeps it only in memory. It registers no service worker and has no catalog
+or media endpoint.
+
+## Development and qualification
+
+```sh
+cargo fmt --all -- --check
+cargo test --workspace
+cargo clippy --workspace --all-targets -- -D warnings
+cd web
+npm ci
+npm audit
+npm run typecheck
+npm test
+npm run build
+ZURADIO_RUNTIME=/path/to/runtime.json npx playwright test
+npm run build:pages
+```
+
+The Playwright suite uses three independent browser contexts for the laptop,
+listener, and controller. It validates a real VDO.Ninja media/data path plus
+all local and remote controls, responsive layouts, listener immutability,
+controller HMAC proof, peer/session binding, monotonic replay rejection, and
+Stop-based grant revocation. See [release qualification](docs/qualification.md)
+for the exact evidence and remaining distribution gates.
+
+## Project layout
+
+- `crates/zuradio-core`: scanner, SQLite catalog/state, closed actions, queue,
+  playlists, favorites, history, and revision/deduplication rules.
+- `crates/zuradio-daemon`: CLI, loopback HTTP/WebSocket server, authenticated
+  Range/artwork endpoints, broadcast sessions, and remote grant enforcement.
+- `web/src/host.ts`: local player UI, Web Audio output, and VDO.Ninja publisher.
+- `web/src/companion.ts`: static listener/controller UI.
+- `packaging/linux` and `scripts/install-local.sh`: local Linux installation.
+- `.github/workflows/pages.yml`: companion-only GitHub Pages deployment with a
+  build-time assertion that rejects media files and local media API references.
+
+Design rationale is in [architecture](docs/architecture.md),
+[threat model](docs/threat-model.md), and
+[source research](docs/research.md).
+
+## Distribution status
+
+The Linux service/browser app is installed and qualified on this laptop. The
+source also keeps the domain and web layers platform-neutral. A signed Tauri v2
+shell is a separate packaging target because it needs a permanent reverse-DNS
+bundle identifier and platform WebView development packages; no identifier is
+silently invented. GitHub Pages deployment likewise requires creation of the
+public repository before the prepared workflow can publish the static companion.
+
+Zuradio is MIT licensed. The pinned VDO.Ninja SDK is MPL-2.0; see
+[third-party notices](THIRD_PARTY_NOTICES.md).

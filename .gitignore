@@ -1,0 +1,9 @@
+/target/
+/web/dist/
+/web/dist-pages/
+/web/node_modules/
+/web/test-results/
+/.zuradio/
+*.db-shm
+*.db-wal
+.DS_Store

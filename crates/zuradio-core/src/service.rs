@@ -1,0 +1,665 @@
+use std::path::{Path, PathBuf};
+use std::time::{SystemTime, UNIX_EPOCH};
+
+use uuid::Uuid;
+
+use crate::catalog::{Catalog, scan_music};
+use crate::model::StoredCommand;
+use crate::{
+    Action, ActionRequest, ActionResult, AppSnapshot, Artwork, CoreError, HistoryEntry,
+    PlaybackStatus, Playlist, RepeatMode, Role, StoredState,
+};
+
+const PROTOCOL_VERSION: u16 = 1;
+const MAX_COMMAND_CACHE: usize = 256;
+const MAX_HISTORY: usize = 500;
+
+#[derive(Debug)]
+pub struct ZuradioCore {
+    catalog: Catalog,
+    state: StoredState,
+}
+
+impl ZuradioCore {
+    /// Opens or creates a persistent Zuradio database.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the database directory, schema, or stored state cannot be read.
+    pub fn open(database_path: &Path) -> Result<Self, CoreError> {
+        let catalog = Catalog::open(database_path)?;
+        Self::from_catalog(catalog)
+    }
+
+    /// Creates an isolated in-memory authority, primarily for tests and embedding.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `SQLite` initialization fails.
+    pub fn in_memory() -> Result<Self, CoreError> {
+        Self::from_catalog(Catalog::in_memory()?)
+    }
+
+    fn from_catalog(catalog: Catalog) -> Result<Self, CoreError> {
+        let state = catalog.load_state()?;
+        Ok(Self { catalog, state })
+    }
+
+    /// Returns the canonical catalog and player state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when catalog rows cannot be read.
+    pub fn snapshot(&self) -> Result<AppSnapshot, CoreError> {
+        Ok(AppSnapshot {
+            protocol: PROTOCOL_VERSION,
+            revision: self.state.revision,
+            tracks: self.catalog.tracks()?,
+            playlists: self.state.playlists.clone(),
+            favorites: self.state.favorites.clone(),
+            history: self.state.history.clone(),
+            player: self.state.player.clone(),
+        })
+    }
+
+    /// Replaces catalog availability information with a recursive scan of `roots`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid roots, unreadable media, or storage failures.
+    pub fn scan(&mut self, roots: &[PathBuf]) -> Result<AppSnapshot, CoreError> {
+        let tracks = scan_music(roots)?;
+        self.catalog.replace_scan(&tracks)?;
+        self.bump_revision();
+        self.persist()?;
+        self.snapshot()
+    }
+
+    /// Resolves an available track to its canonical local path.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the catalog cannot be read or the track is unavailable.
+    pub fn track_path(&self, track_id: &str) -> Result<PathBuf, CoreError> {
+        self.catalog
+            .track_path(track_id)?
+            .ok_or_else(|| CoreError::NotFound("track is unavailable".into()))
+    }
+
+    /// Reads bounded embedded artwork for a catalog track.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the catalog or tagged media file cannot be read.
+    pub fn track_artwork(&self, track_id: &str) -> Result<Option<Artwork>, CoreError> {
+        self.catalog.artwork(track_id)
+    }
+
+    /// Validates and applies one typed action to the authoritative state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for malformed, stale, unauthorized, or unpersistable actions.
+    pub fn execute(&mut self, request: ActionRequest) -> Result<ActionResult, CoreError> {
+        validate_request(&request)?;
+        if let Some(cached) = self
+            .state
+            .commands
+            .iter()
+            .find(|entry| entry.command_id == request.command_id)
+        {
+            return Ok(cached.result.clone());
+        }
+        if request.actor.role == Role::Listener {
+            return Err(CoreError::Forbidden);
+        }
+        if let Some(expected) = request.expected_revision
+            && expected != self.state.revision
+        {
+            return Err(CoreError::Conflict);
+        }
+
+        self.apply(request.action, request.actor.role)?;
+        self.bump_revision();
+        let result = ActionResult {
+            command_id: request.command_id.clone(),
+            revision: self.state.revision,
+            applied: true,
+        };
+        self.state.commands.push(StoredCommand {
+            command_id: request.command_id,
+            result: result.clone(),
+        });
+        if self.state.commands.len() > MAX_COMMAND_CACHE {
+            let excess = self.state.commands.len() - MAX_COMMAND_CACHE;
+            self.state.commands.drain(0..excess);
+        }
+        self.persist()?;
+        Ok(result)
+    }
+
+    fn apply(&mut self, action: Action, role: Role) -> Result<(), CoreError> {
+        if role == Role::Controller && matches!(action, Action::ReportPlayback { .. }) {
+            return Err(CoreError::Forbidden);
+        }
+        match action {
+            Action::Play => self.play(),
+            Action::Pause => self.state.player.status = PlaybackStatus::Paused,
+            Action::Stop => self.stop(),
+            Action::PlayTrack { track_id } => self.play_track(&track_id)?,
+            Action::Seek { position_ms } => self.seek(position_ms)?,
+            Action::Next => self.next(false),
+            Action::Previous => self.previous(),
+            Action::SetVolume { volume } => self.set_volume(volume)?,
+            Action::SetMuted { muted } => self.state.player.muted = muted,
+            Action::SetShuffle { enabled } => self.set_shuffle(enabled),
+            Action::SetRepeat { mode } => self.state.player.repeat = mode,
+            Action::QueueAdd { track_id } => self.queue_add_checked(track_id)?,
+            Action::QueueRemove { index } => self.queue_remove(index)?,
+            Action::QueueMove { from, to } => self.queue_move(from, to)?,
+            Action::QueueClear => self.queue_clear(),
+            Action::PlaylistCreate { name } => self.playlist_create(&name)?,
+            Action::PlaylistRename { playlist_id, name } => {
+                self.playlist_rename(&playlist_id, &name)?;
+            }
+            Action::PlaylistDelete { playlist_id } => self.playlist_delete(&playlist_id)?,
+            Action::PlaylistAdd {
+                playlist_id,
+                track_id,
+            } => self.playlist_add(&playlist_id, track_id)?,
+            Action::PlaylistRemove { playlist_id, index } => {
+                self.playlist_remove(&playlist_id, index)?;
+            }
+            Action::PlaylistMove {
+                playlist_id,
+                from,
+                to,
+            } => self.playlist_move(&playlist_id, from, to)?,
+            Action::FavoriteSet { track_id, favorite } => self.favorite_set(&track_id, favorite)?,
+            Action::ReportPlayback {
+                status,
+                position_ms,
+                error,
+            } => self.report_playback(status, position_ms, error),
+        }
+        Ok(())
+    }
+
+    fn stop(&mut self) {
+        self.state.player.status = PlaybackStatus::Stopped;
+        self.state.player.position_ms = 0;
+    }
+
+    fn set_volume(&mut self, volume: u8) -> Result<(), CoreError> {
+        if volume > 100 {
+            return Err(CoreError::InvalidInput(
+                "volume must be from 0 to 100".into(),
+            ));
+        }
+        self.state.player.volume = volume;
+        Ok(())
+    }
+
+    fn queue_add_checked(&mut self, track_id: String) -> Result<(), CoreError> {
+        self.ensure_track(&track_id)?;
+        self.queue_add(track_id);
+        Ok(())
+    }
+
+    fn queue_move(&mut self, from: usize, to: usize) -> Result<(), CoreError> {
+        move_item(&mut self.state.player.queue, from, to)?;
+        if self.state.player.shuffle {
+            self.state.player.queue_before_shuffle = Some(self.state.player.queue.clone());
+        }
+        Ok(())
+    }
+
+    fn queue_clear(&mut self) {
+        self.state.player.queue.clear();
+        self.state.player.queue_before_shuffle = self.state.player.shuffle.then(Vec::new);
+        self.state.player.queue_cursor = None;
+        self.state.player.current_track_id = None;
+        self.state.player.status = PlaybackStatus::Stopped;
+        self.state.player.position_ms = 0;
+    }
+
+    fn playlist_rename(&mut self, id: &str, name: &str) -> Result<(), CoreError> {
+        let playlist = self.playlist_mut(id)?;
+        playlist.name = validated_name(name)?;
+        playlist.updated_at_ms = now_ms();
+        Ok(())
+    }
+
+    fn playlist_delete(&mut self, id: &str) -> Result<(), CoreError> {
+        let before = self.state.playlists.len();
+        self.state.playlists.retain(|playlist| playlist.id != id);
+        if self.state.playlists.len() == before {
+            return Err(CoreError::NotFound("playlist not found".into()));
+        }
+        Ok(())
+    }
+
+    fn playlist_add(&mut self, id: &str, track_id: String) -> Result<(), CoreError> {
+        self.ensure_track(&track_id)?;
+        let playlist = self.playlist_mut(id)?;
+        playlist.track_ids.push(track_id);
+        playlist.updated_at_ms = now_ms();
+        Ok(())
+    }
+
+    fn playlist_remove(&mut self, id: &str, index: usize) -> Result<(), CoreError> {
+        let playlist = self.playlist_mut(id)?;
+        if index >= playlist.track_ids.len() {
+            return Err(CoreError::InvalidInput(
+                "playlist index is out of range".into(),
+            ));
+        }
+        playlist.track_ids.remove(index);
+        playlist.updated_at_ms = now_ms();
+        Ok(())
+    }
+
+    fn playlist_move(&mut self, id: &str, from: usize, to: usize) -> Result<(), CoreError> {
+        let playlist = self.playlist_mut(id)?;
+        move_item(&mut playlist.track_ids, from, to)?;
+        playlist.updated_at_ms = now_ms();
+        Ok(())
+    }
+
+    fn favorite_set(&mut self, track_id: &str, favorite: bool) -> Result<(), CoreError> {
+        self.ensure_track(track_id)?;
+        self.state.favorites.retain(|existing| existing != track_id);
+        if favorite {
+            self.state.favorites.push(track_id.to_owned());
+        }
+        Ok(())
+    }
+
+    fn report_playback(&mut self, status: PlaybackStatus, position_ms: u64, error: Option<String>) {
+        self.state.player.status = status;
+        self.state.player.position_ms = position_ms;
+        self.state.player.last_error = error;
+        if self.state.player.status == PlaybackStatus::Stopped
+            && self.state.player.current_track_id.is_some()
+        {
+            self.next(true);
+        }
+    }
+
+    fn play(&mut self) {
+        if self.state.player.current_track_id.is_none() && !self.state.player.queue.is_empty() {
+            self.state.player.queue_cursor = Some(0);
+            self.state.player.current_track_id = self.state.player.queue.first().cloned();
+            self.record_history();
+        }
+        if self.state.player.current_track_id.is_some() {
+            self.state.player.status = PlaybackStatus::Playing;
+            self.state.player.last_error = None;
+        }
+    }
+
+    fn play_track(&mut self, track_id: &str) -> Result<(), CoreError> {
+        self.ensure_track(track_id)?;
+        let cursor = self
+            .state
+            .player
+            .queue
+            .iter()
+            .position(|existing| existing == track_id)
+            .unwrap_or_else(|| {
+                self.queue_add(track_id.to_owned());
+                self.state.player.queue.len() - 1
+            });
+        self.state.player.queue_cursor = Some(cursor);
+        self.state.player.current_track_id = Some(track_id.to_owned());
+        self.state.player.position_ms = 0;
+        self.state.player.status = PlaybackStatus::Playing;
+        self.state.player.last_error = None;
+        self.record_history();
+        Ok(())
+    }
+
+    fn seek(&mut self, position_ms: u64) -> Result<(), CoreError> {
+        let Some(track_id) = self.state.player.current_track_id.as_deref() else {
+            return Err(CoreError::InvalidInput("no track is selected".into()));
+        };
+        let track = self
+            .catalog
+            .track(track_id)?
+            .ok_or_else(|| CoreError::NotFound("track not found".into()))?;
+        self.state.player.position_ms = if track.duration_ms == 0 {
+            position_ms
+        } else {
+            position_ms.min(track.duration_ms)
+        };
+        Ok(())
+    }
+
+    fn next(&mut self, natural_end: bool) {
+        if self.state.player.queue.is_empty() {
+            self.state.player.status = PlaybackStatus::Stopped;
+            return;
+        }
+        if natural_end && self.state.player.repeat == RepeatMode::One {
+            self.state.player.position_ms = 0;
+            self.state.player.status = PlaybackStatus::Playing;
+            self.record_history();
+            return;
+        }
+        let current = self.state.player.queue_cursor.unwrap_or(0);
+        let next = current.saturating_add(1);
+        if next < self.state.player.queue.len() {
+            self.select_queue_index(next);
+        } else if self.state.player.repeat == RepeatMode::All {
+            self.select_queue_index(0);
+        } else {
+            self.state.player.status = PlaybackStatus::Stopped;
+            self.state.player.position_ms = 0;
+        }
+    }
+
+    fn previous(&mut self) {
+        if self.state.player.position_ms > 5_000 {
+            self.state.player.position_ms = 0;
+            return;
+        }
+        let current = self.state.player.queue_cursor.unwrap_or(0);
+        if current > 0 {
+            self.select_queue_index(current - 1);
+        } else {
+            self.state.player.position_ms = 0;
+        }
+    }
+
+    fn select_queue_index(&mut self, index: usize) {
+        self.state.player.queue_cursor = Some(index);
+        self.state.player.current_track_id = self.state.player.queue.get(index).cloned();
+        self.state.player.position_ms = 0;
+        self.state.player.status = PlaybackStatus::Playing;
+        self.state.player.last_error = None;
+        self.record_history();
+    }
+
+    fn queue_remove(&mut self, index: usize) -> Result<(), CoreError> {
+        if index >= self.state.player.queue.len() {
+            return Err(CoreError::InvalidInput(
+                "queue index is out of range".into(),
+            ));
+        }
+        let removed = self.state.player.queue[index].clone();
+        let occurrence = self.state.player.queue[..index]
+            .iter()
+            .filter(|track_id| *track_id == &removed)
+            .count();
+        self.state.player.queue.remove(index);
+        if self.state.player.shuffle
+            && let Some(original) = self.state.player.queue_before_shuffle.as_mut()
+        {
+            remove_occurrence(original, &removed, occurrence);
+        }
+        match self.state.player.queue_cursor {
+            Some(cursor) if cursor == index => {
+                if self.state.player.queue.is_empty() {
+                    self.state.player.queue_cursor = None;
+                    self.state.player.current_track_id = None;
+                    self.state.player.status = PlaybackStatus::Stopped;
+                } else {
+                    self.select_queue_index(index.min(self.state.player.queue.len() - 1));
+                }
+            }
+            Some(cursor) if cursor > index => self.state.player.queue_cursor = Some(cursor - 1),
+            _ => {}
+        }
+        Ok(())
+    }
+
+    fn set_shuffle(&mut self, enabled: bool) {
+        if self.state.player.shuffle == enabled {
+            return;
+        }
+        let current = self.state.player.current_track_id.clone();
+        if enabled {
+            self.state.player.queue_before_shuffle = Some(self.state.player.queue.clone());
+            let salt = self.state.revision.to_le_bytes();
+            self.state.player.queue.sort_by_key(|track_id| {
+                let mut input = salt.to_vec();
+                input.extend_from_slice(track_id.as_bytes());
+                blake3::hash(&input).as_bytes().to_owned()
+            });
+        } else if let Some(original) = self.state.player.queue_before_shuffle.take() {
+            self.state.player.queue = original;
+        }
+        self.state.player.queue_cursor = current
+            .as_ref()
+            .and_then(|id| self.state.player.queue.iter().position(|entry| entry == id));
+        self.state.player.shuffle = enabled;
+    }
+
+    fn queue_add(&mut self, track_id: String) {
+        if self.state.player.shuffle {
+            self.state
+                .player
+                .queue_before_shuffle
+                .get_or_insert_with(|| self.state.player.queue.clone())
+                .push(track_id.clone());
+        }
+        self.state.player.queue.push(track_id);
+    }
+
+    fn playlist_create(&mut self, name: &str) -> Result<(), CoreError> {
+        let name = validated_name(name)?;
+        if self
+            .state
+            .playlists
+            .iter()
+            .any(|playlist| playlist.name.eq_ignore_ascii_case(&name))
+        {
+            return Err(CoreError::InvalidInput(
+                "a playlist with that name already exists".into(),
+            ));
+        }
+        let timestamp = now_ms();
+        self.state.playlists.push(Playlist {
+            id: Uuid::new_v4().to_string(),
+            name,
+            track_ids: Vec::new(),
+            created_at_ms: timestamp,
+            updated_at_ms: timestamp,
+        });
+        Ok(())
+    }
+
+    fn playlist_mut(&mut self, id: &str) -> Result<&mut Playlist, CoreError> {
+        self.state
+            .playlists
+            .iter_mut()
+            .find(|playlist| playlist.id == id)
+            .ok_or_else(|| CoreError::NotFound("playlist not found".into()))
+    }
+
+    fn ensure_track(&self, id: &str) -> Result<(), CoreError> {
+        match self.catalog.track(id)? {
+            Some(track) if track.available => Ok(()),
+            Some(_) => Err(CoreError::NotFound("track is currently unavailable".into())),
+            None => Err(CoreError::NotFound("track not found".into())),
+        }
+    }
+
+    fn record_history(&mut self) {
+        if let Some(track_id) = self.state.player.current_track_id.clone() {
+            self.state.history.insert(
+                0,
+                HistoryEntry {
+                    track_id,
+                    played_at_ms: now_ms(),
+                },
+            );
+            self.state.history.truncate(MAX_HISTORY);
+        }
+    }
+
+    fn bump_revision(&mut self) {
+        self.state.revision = self.state.revision.saturating_add(1);
+    }
+
+    fn persist(&mut self) -> Result<(), CoreError> {
+        self.catalog.save_state(&self.state)
+    }
+}
+
+fn validate_request(request: &ActionRequest) -> Result<(), CoreError> {
+    if request.protocol != PROTOCOL_VERSION {
+        return Err(CoreError::InvalidInput(
+            "unsupported protocol version".into(),
+        ));
+    }
+    if request.command_id.is_empty() || request.command_id.len() > 128 {
+        return Err(CoreError::InvalidInput("invalid command ID".into()));
+    }
+    if request
+        .actor
+        .peer_id
+        .as_ref()
+        .is_some_and(|peer| peer.len() > 128)
+    {
+        return Err(CoreError::InvalidInput("invalid peer ID".into()));
+    }
+    Ok(())
+}
+
+fn validated_name(name: &str) -> Result<String, CoreError> {
+    let trimmed = name.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > 80 {
+        return Err(CoreError::InvalidInput(
+            "playlist name must contain 1 to 80 characters".into(),
+        ));
+    }
+    Ok(trimmed.to_owned())
+}
+
+fn move_item<T>(items: &mut Vec<T>, from: usize, to: usize) -> Result<(), CoreError> {
+    if from >= items.len() || to >= items.len() {
+        return Err(CoreError::InvalidInput("move index is out of range".into()));
+    }
+    if from != to {
+        let item = items.remove(from);
+        items.insert(to, item);
+    }
+    Ok(())
+}
+
+fn remove_occurrence(items: &mut Vec<String>, value: &str, occurrence: usize) {
+    if let Some(index) = items
+        .iter()
+        .enumerate()
+        .filter(|(_, candidate)| candidate.as_str() == value)
+        .nth(occurrence)
+        .map(|(index, _)| index)
+    {
+        items.remove(index);
+    }
+}
+
+fn now_ms() -> i64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .ok()
+        .and_then(|duration| i64::try_from(duration.as_millis()).ok())
+        .unwrap_or(0)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Actor;
+
+    fn request(revision: u64, action: Action) -> ActionRequest {
+        ActionRequest {
+            protocol: 1,
+            command_id: Uuid::new_v4().to_string(),
+            expected_revision: Some(revision),
+            actor: Actor::local(),
+            action,
+        }
+    }
+
+    #[test]
+    fn creates_and_renames_playlist() -> Result<(), CoreError> {
+        let mut core = ZuradioCore::in_memory()?;
+        let revision = core.snapshot()?.revision;
+        core.execute(request(
+            revision,
+            Action::PlaylistCreate {
+                name: "Sunday".into(),
+            },
+        ))?;
+        let snapshot = core.snapshot()?;
+        assert_eq!(snapshot.playlists[0].name, "Sunday");
+        let id = snapshot.playlists[0].id.clone();
+        core.execute(request(
+            snapshot.revision,
+            Action::PlaylistRename {
+                playlist_id: id,
+                name: "Late Sunday".into(),
+            },
+        ))?;
+        assert_eq!(core.snapshot()?.playlists[0].name, "Late Sunday");
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_stale_revision_and_listener_mutation() -> Result<(), CoreError> {
+        let mut core = ZuradioCore::in_memory()?;
+        let initial = core.snapshot()?.revision;
+        core.execute(request(
+            initial,
+            Action::PlaylistCreate { name: "One".into() },
+        ))?;
+        assert!(matches!(
+            core.execute(request(initial, Action::Pause)),
+            Err(CoreError::Conflict)
+        ));
+        let mut listener = request(core.snapshot()?.revision, Action::Pause);
+        listener.actor.role = Role::Listener;
+        assert!(matches!(core.execute(listener), Err(CoreError::Forbidden)));
+        Ok(())
+    }
+
+    #[test]
+    fn deduplicates_command_ids() -> Result<(), CoreError> {
+        let mut core = ZuradioCore::in_memory()?;
+        let revision = core.snapshot()?.revision;
+        let command = request(
+            revision,
+            Action::PlaylistCreate {
+                name: "Once".into(),
+            },
+        );
+        let first = core.execute(command.clone())?;
+        let second = core.execute(command)?;
+        assert_eq!(first, second);
+        assert_eq!(core.snapshot()?.playlists.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn restores_queue_order_after_shuffle_and_keeps_new_tracks() -> Result<(), CoreError> {
+        let mut core = ZuradioCore::in_memory()?;
+        let original = vec!["third".into(), "first".into(), "second".into()];
+        core.state.player.queue = original.clone();
+
+        core.set_shuffle(true);
+        assert_eq!(
+            core.state.player.queue_before_shuffle,
+            Some(original.clone())
+        );
+        core.queue_add("fourth".into());
+        core.set_shuffle(false);
+
+        let mut expected = original;
+        expected.push("fourth".into());
+        assert_eq!(core.state.player.queue, expected);
+        assert_eq!(core.state.player.queue_before_shuffle, None);
+        Ok(())
+    }
+}

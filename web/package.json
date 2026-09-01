@@ -1,0 +1,26 @@
+{
+  "name": "zuradio-web-companion",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "build:pages": "ZURADIO_PAGES_BUILD=1 vite build",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:ui": "playwright test",
+    "preview": "vite preview"
+  },
+  "dependencies": {
+    "@vdoninja/sdk": "1.5.5"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.1",
+    "@types/node": "24.3.0",
+    "jsdom": "26.1.0",
+    "typescript": "5.9.2",
+    "vite": "7.3.6",
+    "vitest": "3.2.7"
+  }
+}

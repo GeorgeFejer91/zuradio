@@ -1,0 +1,18 @@
+#!/bin/sh
+set -eu
+
+systemctl --user start zuradio.service
+
+attempt=0
+while [ "$attempt" -lt 100 ]; do
+  if "$HOME/.local/bin/zuradio" open >/dev/null 2>&1; then
+    exit 0
+  fi
+  attempt=$((attempt + 1))
+  sleep 0.1
+done
+
+if command -v notify-send >/dev/null 2>&1; then
+  notify-send "Zuradio" "The local music service did not become ready."
+fi
+exit 1

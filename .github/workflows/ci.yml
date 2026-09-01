@@ -1,0 +1,61 @@
+name: Verify Zuradio
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  rust:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Install the pinned Rust toolchain
+        run: rustup show
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Run Rust tests
+        run: cargo test --workspace --locked
+      - name: Reject Clippy warnings
+        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+
+  web:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install locked dependencies
+        run: npm ci
+        working-directory: web
+      - name: Audit all web dependencies
+        run: npm audit
+        working-directory: web
+      - name: Typecheck
+        run: npm run typecheck
+        working-directory: web
+      - name: Run unit tests
+        run: npm test
+        working-directory: web
+      - name: Build local host and companion
+        run: npm run build
+        working-directory: web
+      - name: Build and inspect the Pages artifact
+        run: npm run build:pages
+        working-directory: web
+      - name: Reject music and local media routes in Pages
+        run: |
+          if find web/dist-pages -type f | grep -E '\.(aac|aif|aiff|alac|flac|m4a|mp3|mp4|ogg|opus|wav|webm)$'; then
+            echo "Music files must never be included in the companion artifact" >&2
+            exit 1
+          fi
+          if grep -RIl '/api/v1/media' web/dist-pages; then
+            echo "The static companion must not contain the laptop media endpoint" >&2
+            exit 1
+          fi
