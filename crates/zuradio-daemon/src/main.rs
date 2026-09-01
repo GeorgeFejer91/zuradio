@@ -66,9 +66,11 @@ enum Command {
         value: u8,
     },
     Mute {
+        #[arg(action = clap::ArgAction::Set)]
         enabled: bool,
     },
     Shuffle {
+        #[arg(action = clap::ArgAction::Set)]
         enabled: bool,
     },
     Repeat {
@@ -80,6 +82,7 @@ enum Command {
     Playlist(PlaylistCommand),
     Favorite {
         track_id: String,
+        #[arg(action = clap::ArgAction::Set)]
         enabled: bool,
     },
 }
@@ -276,4 +279,31 @@ fn default_data_dir() -> PathBuf {
         || PathBuf::from(".zuradio"),
         |home| PathBuf::from(home).join(".local/share/zuradio"),
     )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn parses_explicit_boolean_action_values() -> Result<(), clap::Error> {
+        let muted = Cli::try_parse_from(["zuradio", "mute", "true"])?;
+        assert!(matches!(muted.command, Command::Mute { enabled: true }));
+
+        let unmuted = Cli::try_parse_from(["zuradio", "mute", "false"])?;
+        assert!(matches!(unmuted.command, Command::Mute { enabled: false }));
+
+        let unshuffled = Cli::try_parse_from(["zuradio", "shuffle", "false"])?;
+        assert!(matches!(
+            unshuffled.command,
+            Command::Shuffle { enabled: false }
+        ));
+
+        let favorite = Cli::try_parse_from(["zuradio", "favorite", "track-id", "true"])?;
+        assert!(matches!(
+            favorite.command,
+            Command::Favorite { enabled: true, .. }
+        ));
+        Ok(())
+    }
 }

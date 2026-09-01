@@ -119,6 +119,7 @@ or media endpoint.
 cargo fmt --all -- --check
 cargo test --workspace
 cargo clippy --workspace --all-targets -- -D warnings
+ZURADIO_TEST_MUSIC=/path/to/test-music ./scripts/qualify-cli.sh
 cd web
 npm ci
 npm audit
@@ -145,6 +146,8 @@ for the exact evidence and remaining distribution gates.
 - `web/src/host.ts`: local player UI, Web Audio output, and VDO.Ninja publisher.
 - `web/src/companion.ts`: static listener/controller UI.
 - `packaging/linux` and `scripts/install-local.sh`: local Linux installation.
+- `scripts/qualify-cli.sh`: disposable end-to-end qualification of the complete
+  installed CLI mutation surface.
 - `.github/workflows/pages.yml`: companion-only GitHub Pages deployment with a
   build-time assertion that rejects media files and local media API references.
 

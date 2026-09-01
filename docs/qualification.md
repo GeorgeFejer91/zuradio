@@ -29,12 +29,23 @@ and reported success.
 
 ### Rust
 
-- `cargo test --workspace`: 8 passed, 0 failed.
+- `cargo test --workspace`: 9 passed, 0 failed.
 - `cargo clippy --workspace --all-targets -- -D warnings`: passed.
 - Core coverage includes stale-revision rejection, listener mutation denial,
   command-ID deduplication, playlist creation/rename, queue shuffle restoration,
-  symlink refusal, JavaScript-safe broadcast epochs, and single-Range parsing.
+  symlink refusal, JavaScript-safe broadcast epochs, explicit CLI boolean
+  parsing, and single-Range parsing.
 - Optimized `zuradio-daemon` release build: passed.
+
+### Installed CLI
+
+`scripts/qualify-cli.sh` started the optimized installed-style daemon with a
+fresh temporary database and exercised the executable rather than calling Rust
+internals directly. It passed scanning, search, play/pause/stop, seek,
+next/previous, volume, explicit mute true/false, shuffle true/false, all repeat
+modes, queue add/move/remove/clear, favorite true/false, and playlist
+create/list/add/move/remove/rename/delete. Final canonical state was checked with
+`jq`, and the temporary daemon/database were removed.
 
 ### Web and dependencies
 
@@ -105,6 +116,9 @@ negative assertions before upload.
   editable while the error is shown.
 - Local user actions could race a short track's automatic `next`, causing stale
   revisions; host mutations are now serialized.
+- Clap interpreted positional boolean values as presence flags, preventing CLI
+  commands from expressing both enabled and disabled states; mute, shuffle, and
+  favorite now require and parse explicit `true` or `false` values.
 - The installer could scan before the first service startup had written its
   runtime file; upgrades now restart and actively wait for authenticated
   readiness.
