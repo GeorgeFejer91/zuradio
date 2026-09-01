@@ -1888,8 +1888,10 @@ button .ui-icon {
 
 .connection-summary {
   display: flex;
+  min-width: 170px;
   align-items: center;
   gap: 10px;
+  margin-right: auto;
 }
 
 .connection-summary strong,
@@ -1904,6 +1906,43 @@ button .ui-icon {
 .connection-summary span {
   color: var(--muted);
   font-size: 11px;
+}
+
+.mode-switcher {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(82px, 1fr));
+  padding: 0;
+  border: 1px solid var(--line-strong);
+}
+
+.mode-switcher button {
+  display: inline-flex;
+  min-width: 0;
+  min-height: 40px;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  padding: 7px 10px;
+  border: 0;
+  border-left: 1px solid var(--line);
+  border-radius: 0;
+  background: transparent;
+  color: var(--muted);
+}
+
+.mode-switcher button:first-child {
+  border-left: 0;
+}
+
+.mode-switcher button .ui-icon {
+  width: 15px;
+  height: 15px;
+  margin: 0;
+}
+
+.mode-switcher button[aria-current="page"] {
+  background: #e8e7e1;
+  color: #090909;
 }
 
 .companion-player {
@@ -2423,7 +2462,38 @@ button .ui-icon {
   }
 
   .connected-strip {
+    display: grid;
+    grid-template-areas:
+      "connection-summary disconnect"
+      "mode-switcher mode-switcher";
+    grid-template-columns: minmax(0, 1fr) auto;
     min-height: 56px;
+    gap: 9px 10px;
+    padding-bottom: 12px;
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    background: var(--background);
+  }
+
+  .connected-strip .connection-summary {
+    grid-area: connection-summary;
+    min-width: 0;
+    margin-right: 0;
+  }
+
+  .connected-strip .mode-switcher {
+    grid-area: mode-switcher;
+    width: 100%;
+  }
+
+  .connected-strip > button {
+    grid-area: disconnect;
+  }
+
+  .mode-switcher button {
+    min-height: 46px;
+    padding-inline: 6px;
   }
 
   .connection-summary span {

@@ -88,19 +88,23 @@ test("streams from the laptop while enforcing listener and controller roles", as
     await expect(controller.getByTestId("companion-visualizer")).toBeVisible();
     await expect(controller.locator(".controller-panel .track-row")).toHaveCount(initialTrackCount);
     await expect(controller.locator(".companion-cover")).toBeVisible();
+    await expect(controller.getByRole("navigation", { name: "Access mode" })).toBeVisible();
     const mobileLayout = await controller.evaluate(() => {
       const navigation = document.querySelector<HTMLElement>('.controller-panel nav[aria-label="Controller sections"]')?.getBoundingClientRect();
       const firstButton = document.querySelector<HTMLElement>('.controller-panel nav[aria-label="Controller sections"] button')?.getBoundingClientRect();
+      const modeButton = document.querySelector<HTMLElement>('.mode-switcher button')?.getBoundingClientRect();
       const cover = document.querySelector<HTMLElement>(".companion-cover")?.getBoundingClientRect();
       return {
         navigationAtBottom: Boolean(navigation && Math.abs(navigation.bottom - window.innerHeight) <= 2),
         navigationTouchTarget: firstButton?.height ?? 0,
+        modeTouchTarget: modeButton?.height ?? 0,
         coverWidth: cover?.width ?? 0,
         noHorizontalOverflow: document.documentElement.scrollWidth <= window.innerWidth,
       };
     });
     expect(mobileLayout.navigationAtBottom).toBe(true);
     expect(mobileLayout.navigationTouchTarget).toBeGreaterThanOrEqual(44);
+    expect(mobileLayout.modeTouchTarget).toBeGreaterThanOrEqual(44);
     expect(mobileLayout.coverWidth).toBeGreaterThanOrEqual(88);
     expect(mobileLayout.noHorizontalOverflow).toBe(true);
     await controller.screenshot({ path: "test-results/mobile-controller-library.png", fullPage: true });
@@ -117,6 +121,25 @@ test("streams from the laptop while enforcing listener and controller roles", as
     expect(desktopLayout).toEqual({ ordered: true, noHorizontalOverflow: true });
     await controller.screenshot({ path: "test-results/desktop-controller.png", fullPage: true });
     await controller.setViewportSize({ width: 390, height: 844 });
+
+    const switchToUploadStarted = Date.now();
+    await controller.getByTestId("switch-upload").click();
+    await expect(controller.getByText("Upload connected", { exact: true })).toBeVisible({ timeout: 20_000 });
+    const switchToUploadMs = Date.now() - switchToUploadStarted;
+    expect(switchToUploadMs, "control-to-upload switch latency").toBeLessThan(MAX_CONNECT_LATENCY_MS);
+    await expect(controller.getByTestId("switch-upload")).toHaveAttribute("aria-current", "page");
+    await expect(controller.getByRole("heading", { name: "Add music to this laptop" })).toBeVisible();
+    await expect(controller.getByRole("dialog")).toHaveCount(0);
+    await controller.screenshot({ path: "test-results/mobile-upload-mode.png", fullPage: true });
+
+    const switchToControlStarted = Date.now();
+    await controller.getByTestId("switch-control").click();
+    await expect(controller.getByText("Controller connected", { exact: true })).toBeVisible({ timeout: 20_000 });
+    const switchToControlMs = Date.now() - switchToControlStarted;
+    expect(switchToControlMs, "upload-to-control switch latency").toBeLessThan(MAX_CONNECT_LATENCY_MS);
+    await expect(controller.getByTestId("switch-control")).toHaveAttribute("aria-current", "page");
+    await expect(controller.getByLabel("Remote player controls")).toBeVisible();
+    await expect(controller.getByRole("dialog")).toHaveCount(0);
 
     const remotePlayPause = controller.getByTestId("remote-play-pause");
     if ((await remotePlayPause.textContent()) === "Play") {
@@ -282,7 +305,7 @@ test("streams from the laptop while enforcing listener and controller roles", as
     await expect(listener.getByTestId("connect-listen")).toBeVisible();
     await test.info().attach("latency-metrics.json", {
       body: JSON.stringify(
-        { listenerConnectMs, controllerConnectMs, commandRttMs, trustedConnectMs, trustedCommandRttMs },
+        { listenerConnectMs, controllerConnectMs, switchToUploadMs, switchToControlMs, commandRttMs, trustedConnectMs, trustedCommandRttMs },
         null,
         2,
       ),

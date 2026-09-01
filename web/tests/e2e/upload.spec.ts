@@ -38,7 +38,7 @@ test("rejects a wrong password before exposing live audio", async ({ browser }) 
   }
 });
 
-test("uploads a tagged music file and exposes the catalogued result", async ({ browser }) => {
+test("switches from control to upload and exposes the catalogued result", async ({ browser }) => {
   test.skip(!fixture || !fs.existsSync(fixture), "Set ZURADIO_UPLOAD_FIXTURE to a valid audio file");
   test.setTimeout(150_000);
   const host = await authenticatedHost(browser);
@@ -46,10 +46,13 @@ test("uploads a tagged music file and exposes the catalogued result", async ({ b
     await startFreshBroadcast(host);
     const uploader = await browser.newPage();
     await uploader.goto(companionBase);
-    await uploader.getByTestId("connect-upload").click();
+    await uploader.getByTestId("connect-control").click();
     await uploader.getByTestId("password").fill(password);
     await uploader.getByTestId("connect").click();
+    await expect(uploader.getByText("Controller connected", { exact: true })).toBeVisible({ timeout: 45_000 });
+    await uploader.getByTestId("switch-upload").click();
     await expect(uploader.getByText("Upload connected", { exact: true })).toBeVisible({ timeout: 45_000 });
+    await expect(uploader.getByRole("dialog")).toHaveCount(0);
     await uploader.locator("[data-upload-files]").setInputFiles(fixture as string);
     await expect(uploader.getByText("1 file selected", { exact: true })).toBeVisible();
     const startedAt = Date.now();

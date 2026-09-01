@@ -71,6 +71,26 @@ try {
     throw new Error(`Public controller expected ${expectedTracks} tracks, found ${await trackRows.count()}`);
   }
 
+  const switchToUploadStarted = performance.now();
+  await controller.getByTestId("switch-upload").click();
+  await controller.getByText("Upload connected", { exact: true }).waitFor({ timeout: 20_000 });
+  const switchToUploadMs = Math.round(performance.now() - switchToUploadStarted);
+  assertBelow("control-to-upload switch", switchToUploadMs, maxConnectMs);
+  if ((await controller.getByRole("dialog").count()) !== 0) {
+    throw new Error("Switching to upload unexpectedly requested the Zuradio password");
+  }
+  await controller.getByRole("heading", { name: "Add music to this laptop" }).waitFor();
+
+  const switchToControlStarted = performance.now();
+  await controller.getByTestId("switch-control").click();
+  await controller.getByText("Controller connected", { exact: true }).waitFor({ timeout: 20_000 });
+  const switchToControlMs = Math.round(performance.now() - switchToControlStarted);
+  assertBelow("upload-to-control switch", switchToControlMs, maxConnectMs);
+  if ((await controller.getByRole("dialog").count()) !== 0) {
+    throw new Error("Switching back to control unexpectedly requested the Zuradio password");
+  }
+  await controller.getByLabel("Remote player controls").waitFor();
+
   await controller.getByRole("searchbox", { name: "Search library" }).fill("Arpent");
   await controller.getByRole("button", { name: "Play Arpent" }).click();
   await host.waitForFunction(
@@ -135,6 +155,8 @@ try {
     result: "passed",
     listenerConnectMs,
     controllerConnectMs,
+    switchToUploadMs,
+    switchToControlMs,
     commandRttMs,
     trustedConnectMs,
     trustedCommandRttMs,

@@ -2,7 +2,7 @@ import "./style.css";
 
 import type { Action, AppSnapshot, ImportedFile, Playlist, RemoteMode } from "./types";
 import { isSupportedAudioFileName, SUPPORTED_AUDIO_ACCEPT } from "./formats";
-import { icon } from "./icons";
+import { icon, type IconName } from "./icons";
 import { CompanionBridge, type PublicNowPlaying } from "./vdo";
 import { renderSoundVisualizer, SvgSoundVisualizer } from "./visualizer";
 
@@ -143,6 +143,11 @@ async function handleClick(target: HTMLElement): Promise<void> {
     dialogMode = mode;
     render();
     root.querySelector<HTMLInputElement>("[data-password]")?.focus();
+    return;
+  }
+  if (name === "switch-mode") {
+    const mode = target.dataset.mode as RemoteMode;
+    if (mode !== selectedMode || bridge.mode !== mode) await connectTrusted(mode, true);
     return;
   }
   if (name === "forget-device") {
@@ -306,11 +311,12 @@ async function connect(mode: RemoteMode, password: string): Promise<void> {
   }
 }
 
-async function connectTrusted(mode: RemoteMode): Promise<void> {
+async function connectTrusted(mode: RemoteMode, switching = false): Promise<void> {
   errorMessage = "";
   busy = true;
   selectedMode = mode;
   dialogMode = null;
+  if (switching) connectionStatus = `Switching to ${capitalize(mode)}…`;
   render();
   try {
     await bridge.connectTrusted(mode);
@@ -384,26 +390,39 @@ async function renamePlaylist(playlistId: string, name: string): Promise<void> {
 }
 
 function render(): void {
-  const mode = bridge.mode ?? selectedMode;
+  const mode = selectedMode ?? bridge.mode;
   root.innerHTML = `<main class="companion-shell ${connected ? `is-connected is-${mode ?? "listen"}` : "is-landing"}" aria-busy="${busy}">
     <header class="companion-header"><div class="companion-brand"><span class="brand-mark">${icon("music")}</span><div><span class="wordmark">ZURADIO</span><h1>Web Companion</h1></div></div>${connected ? `<span class="connection-live">${capitalize(mode ?? "listen")}</span>` : ""}</header>
-    ${connected ? `<section class="connection-panel connected-strip"><div class="connection-summary"><span class="broadcast-indicator active"></span><div><strong>${escapeHtml(connectionStatus)}</strong><span>Linked directly to the laptop</span></div></div><button data-action="disconnect" ${disabled()}>Disconnect</button></section>` : renderConnectionModes()}
+    ${connected ? `<section class="connection-panel connected-strip"><div class="connection-summary"><span class="broadcast-indicator active"></span><div><strong>${escapeHtml(connectionStatus)}</strong><span>Linked directly to the laptop</span></div></div>${renderModeSwitcher(mode ?? "listen")}<button data-action="disconnect" ${disabled()}>Disconnect</button></section>` : renderConnectionModes()}
     ${connected && mode !== "upload" ? `<section class="companion-player">
       <div class="companion-player-heading"><h2>Now playing</h2><span>${mode === "control" ? "Laptop output" : "Live stream"}</span></div>
       ${renderNowPlaying()}
       ${renderSoundVisualizer("companion-visualizer")}
       <div data-audio-mount></div>
       ${renderStreamAudioControls()}
-      ${bridge.isController && snapshot ? renderTransport(snapshot) : ""}
+      ${mode === "control" && snapshot ? renderTransport(snapshot) : ""}
     </section>` : ""}
-    ${bridge.isController && snapshot ? renderController(snapshot) : ""}
-    ${bridge.isUploader ? renderUpload() : ""}
+    ${mode === "control" && snapshot ? renderController(snapshot) : ""}
+    ${mode === "upload" ? renderUpload() : ""}
     ${connected && mode === "listen" ? `<p class="muted access-note">Listen access is read-only. Player and library controls remain on the laptop.</p>` : ""}
     ${dialogMode ? renderPasswordDialog(dialogMode) : ""}
     ${renamingPlaylistId ? renderRenamePlaylistDialog(renamingPlaylistId) : ""}
   </main>`;
   root.querySelector("[data-audio-mount]")?.append(audio);
   visualizer.mount(root.querySelector<SVGSVGElement>("[data-testid='companion-visualizer']"), bridge);
+}
+
+function renderModeSwitcher(mode: RemoteMode): string {
+  const modes: Array<[RemoteMode, string, IconName]> = [
+    ["listen", "Listen", "volume"],
+    ["control", "Control", "library"],
+    ["upload", "Upload", "upload"],
+  ];
+  return `<nav class="mode-switcher" aria-label="Access mode">${modes
+    .map(
+      ([value, label, iconName]) => `<button data-action="switch-mode" data-mode="${value}" data-testid="switch-${value}" aria-current="${mode === value ? "page" : "false"}" aria-label="${mode === value ? `${label} mode active` : `Switch to ${label.toLocaleLowerCase()} mode`}" ${disabled()}>${icon(iconName)}<span>${label}</span></button>`,
+    )
+    .join("")}</nav>`;
 }
 
 function renderConnectionModes(): string {
