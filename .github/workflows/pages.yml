@@ -24,7 +24,7 @@ jobs:
           node-version: 22
           cache: npm
           cache-dependency-path: web/package-lock.json
-      - uses: actions/configure-pages@v5
+      - uses: actions/configure-pages@v6
       - name: Install locked web dependencies
         run: npm ci
         working-directory: web
