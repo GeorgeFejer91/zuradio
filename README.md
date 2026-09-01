@@ -23,9 +23,10 @@ the stream unavailable.
 - One canonical queue with play, pause, stop, next, previous, seek, volume,
   mute, shuffle with order restoration, and off/all/one repeat modes.
 - A complete CLI over the same typed Rust action model used by the UI.
-- A loopback-only local web player, installed as a hardened systemd user
-  service on Linux, plus a Tauri v2 desktop shell with no WebView IPC
-  permissions and the bundle identifier `com.georgefejer.zuradio`.
+- A loopback-only local web player installed as a hardened systemd user service.
+  Linux opens it in a dedicated Chromium app window for complete WebRTC and
+  unattended audio support; the cross-platform Tauri v2 shell remains a
+  least-privilege native fallback with no WebView IPC permissions.
 - Default-on broadcasting from the installed desktop shell, explicit Start/Stop
   controls, and password-discovered, separately scoped Listen, Control, and
   Upload modes with no invitation URLs.
@@ -72,11 +73,11 @@ downloading its AppImage:
 ./scripts/install-tauri-appimage.sh
 ```
 
-This replaces only the application-menu launcher with the Tauri/WebKitGTK
-window. The same systemd service, CLI, library, database, and private runtime
-credentials remain authoritative. The AppImage is installed at
-`~/.local/lib/zuradio/Zuradio.AppImage` and can also be opened with
-`zuradio-desktop-launch`.
+This replaces only the application-menu launcher. On Linux it prefers a
+Chromium app window because many distro WebKitGTK builds omit WebRTC at compile
+time; it falls back to the Tauri binary or AppImage when no Chromium-class
+browser is available. The same systemd service, CLI, library, database, and
+private runtime credentials remain authoritative.
 
 The service starts at login and binds to a random `127.0.0.1` port. Its runtime
 credential file is mode 0600. The browser exchanges a one-use fragment secret
@@ -122,8 +123,9 @@ zuradio favorite TRACK_ID true
 
 Run `zuradio --help` or a subcommand with `--help` for the complete surface.
 CLI commands control canonical Rust state. Audio output is produced by the open
-host UI, so the browser must be open and must have received a playback gesture
-before browser autoplay policy allows unattended CLI playback.
+host UI. The installed Linux app window is launched with unattended audio
+enabled; ordinary development browser tabs may still require one playback
+gesture under their autoplay policy.
 
 Authorized Upload mode accepts individual files or a browser-selected folder.
 Files are transferred sequentially over the encrypted live data bridge,
@@ -174,7 +176,8 @@ The Playwright suite uses independent browser contexts for the laptop,
 listener, controller, and uploader. It validates a real VDO.Ninja media/data
 path, password proof, uploads, metadata edits, WAV/FLAC decode, all local and
 remote controls, responsive layouts, mode isolation, peer/session binding,
-monotonic replay rejection, and Stop-based grant revocation. See
+monotonic replay rejection, Stop-based grant revocation, sub-15-second remote
+connection ceilings, and sub-2-second command acknowledgement. See
 [release qualification](docs/qualification.md)
 for the exact evidence and remaining distribution gates.
 
@@ -184,7 +187,7 @@ for the exact evidence and remaining distribution gates.
   playlists, favorites, history, and revision/deduplication rules.
 - `crates/zuradio-daemon`: CLI, loopback HTTP/WebSocket server, authenticated
   Range/artwork endpoints, broadcast sessions, and remote grant enforcement.
-- `apps/zuradio-desktop`: least-privilege Tauri v2 shell that reuses a healthy
+- `apps/zuradio-desktop`: least-privilege Tauri v2 fallback shell that reuses a healthy
   local service or starts the same Rust authority in process; it accepts only
   exact `127.0.0.1` host navigation and exposes no Tauri commands to the WebView.
 - `web/src/host.ts`: local player UI, Web Audio output, and VDO.Ninja publisher.
@@ -195,6 +198,8 @@ for the exact evidence and remaining distribution gates.
 - `scripts/qualify-browser.sh`: disposable real-browser qualification against
   the VDO.Ninja bridge, including generated WAV/FLAC format fixtures and upload
   performance checks.
+- `web/scripts/verify-installed-public.mjs`: installed desktop to public Pages
+  stream/control check with connection and command latency measurements.
 - `scripts/benchmark-library.sh`: repeatable scan, snapshot, media Range, and
   resident-memory thresholds over a 60-track corpus.
 - `.github/workflows/pages.yml`: companion-only GitHub Pages deployment with a
@@ -206,8 +211,8 @@ Design rationale is in [architecture](docs/architecture.md),
 
 ## Distribution status
 
-The Linux service, CLI, Tauri desktop shell, Debian package, and AppImage are
-built and qualified on this laptop. The public source is available at
+The Linux service, CLI, dedicated WebRTC desktop window, Tauri fallback, Debian
+package, and AppImage are built and qualified on this laptop. The public source is available at
 [GeorgeFejer91/zuradio](https://github.com/GeorgeFejer91/zuradio), and the
 [Zuradio Web Companion](https://georgefejer91.github.io/zuradio/) is deployed
 through GitHub Pages. The cross-platform CI matrix builds the Tauri source on

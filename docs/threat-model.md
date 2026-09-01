@@ -87,8 +87,9 @@ protocol. Direct Internet exposure of the loopback daemon is out of scope.
 - Companion-only Pages artifact inspection: no media files and no local media
   API reference.
 - Tauri v2 shell URL validation, zero-command capability, exact loopback
-  navigation policy, bundled-resource inspection, real WebKitGTK launch, and
-  absence of a duplicate authority process when the systemd service is healthy.
+  navigation policy, bundled-resource inspection, plus an installed Chromium
+  app-shell launch that proves WebRTC and running unattended audio without
+  creating a duplicate authority process.
 - Public GitHub Pages deployment over HTTPS with successful verification and
   deployment workflows.
 

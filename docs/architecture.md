@@ -14,8 +14,8 @@ flowchart LR
   Music["Local music folders"] --> Core["Rust core\ncatalog · playlists · queue · policy"]
   Core --> Audio["Authenticated Range endpoint\nWeb Audio host player"]
   CLI["zuradio CLI"] --> Core
-  Desktop["Tauri v2 shell or Linux service"] --> Core
-  Core <--> Host["Loopback host bridge\nexplicit Start Broadcast"]
+  Desktop["Chromium app shell / Tauri fallback / Linux service"] --> Core
+  Core <--> Host["Loopback host bridge\ndefault-on broadcast"]
   Host -->|"live audio only"| VDO["VDO.Ninja WebRTC transport"]
   Host <--> |"typed commands · state · uploads"| VDO
   Pages["GitHub Pages\nstatic companion assets only"] --> Companion["Zuradio Web Companion"]
@@ -39,6 +39,13 @@ flowchart LR
   permits top-level navigation only to the packaged startup page and an exact
   `http://127.0.0.1:<port>/host/#bootstrap=…` URL, and never loads the hosted
   companion into a privileged WebView.
+
+The installed Linux launcher prefers a dedicated Chromium app window over the
+system WebKitGTK shell. WebRTC is a compile-time WebKitGTK feature and is absent
+from some distribution builds even when the runtime setting exists. The
+Chromium window uses a private Zuradio profile, enables unattended local audio,
+and receives the same protected loopback bootstrap URL. Rust remains the sole
+authority; Chromium is only the audio/UI/WebRTC adapter.
 
 ## One authority, many adapters
 
@@ -93,6 +100,12 @@ a server proof and creates a short, revocable mode-scoped grant. Every
 action/upload also carries a strictly increasing sequence. Upload grants cannot
 control or listen; listener grants cannot inspect the library or mutate it;
 only listen/control receive the live audio route.
+
+Discovery teardown, password-key derivation, and private control transport are
+overlapped where their dependencies allow. Controller commands become
+available as soon as mutual proof and the initial snapshot complete; the
+secondary audio receiver connects without delaying the control surface. Direct
+ordered WebRTC data channels carry commands without polling or proxy hops.
 
 ## Offline behavior
 

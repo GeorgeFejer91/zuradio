@@ -5,8 +5,8 @@ Qualification date: 2026-09-01, Europe/Berlin.
 ## Result
 
 Zuradio is an installed Linux release candidate on this laptop: Rust service,
-complete CLI, least-privilege Tauri shell, Debian package, AppImage, and public
-Web Companion. Native packages remain unsigned, and physical-phone,
+complete CLI, dedicated Chromium WebRTC app window, least-privilege Tauri
+fallback, Debian package, AppImage, and public Web Companion. Native packages remain unsigned, and physical-phone,
 forced-TURN, and endurance qualification remain release-channel gates.
 
 ## Installed result
@@ -15,6 +15,9 @@ forced-TURN, and endurance qualification remain release-channel gates.
   `0.1.0`.
 - Service: `zuradio.service`, enabled and active as a systemd user service.
 - Desktop launcher: `~/.local/share/applications/zuradio.desktop`.
+- Dedicated browser runtime: Chromium 151 under `~/.local/lib/zuradio/chromium`
+  with a private profile and unattended-audio policy.
+- CI-built native Tauri fallback: `~/.local/lib/zuradio/zuradio-desktop`.
 - Native AppImage: `~/.local/lib/zuradio/Zuradio.AppImage`, bundle identifier
   `com.georgefejer.zuradio`.
 - Data directory: `~/.local/share/zuradio`, mode 0700.
@@ -42,16 +45,22 @@ and reported success.
   explicit CLI boolean parsing, and single-Range parsing.
 - Optimized `zuradio-daemon` release build: passed.
 
-### Native desktop shell
+### Desktop shells
 
 - Tauri v2 release source compiled against WebKitGTK 2.52.6 from a local build
   sysroot without modifying the system package database.
 - Debian and self-contained AppImage bundles were built; inspection found the
   host/companion web resources, no music files, and bundled GStreamer playback
   plug-ins including `appsink` and `playback` in the AppImage.
-- The installed AppImage launched at the laptop's 2360 × 1520 HiDPI size and
-  rendered the complete library, queue, transport, scan, search, and broadcast
-  interface.
+- The installed app-window launcher rendered the complete library, queue,
+  transport, scan, search, and broadcast interface. Runtime inspection proved
+  `RTCPeerConnection` is present, the audio context is running without a
+  gesture, the broadcast is active by default, and all three CC0 tracks are
+  cataloged.
+- Debian WebKitGTK 2.52.5 exposes the WebRTC setting but was compiled without
+  the base WebRTC feature. The launcher therefore prefers the installed
+  Chromium app shell and retains the Tauri binary/AppImage as local-only
+  fallbacks rather than falsely reporting a working remote bridge.
 - Process inspection found one healthy systemd daemon plus one desktop shell;
   the shell reused the existing authority instead of starting a duplicate.
 - The Tauri capability grants zero WebView permissions. Unit tests reject
@@ -80,7 +89,7 @@ create/list/add/move/remove/rename/delete. Final canonical state was checked wit
 
 ### Live browser UI
 
-Playwright 1.62.1 with Chromium 151 ran 15 tests with one worker. The complete
+Playwright 1.62.1 with Chromium 151 ran 16 tests with one worker. The complete
 matrix passed first against the development release build and then again against
 the binary and web files installed under `~/.local` using an isolated database:
 
@@ -111,10 +120,19 @@ the binary and web files installed under `~/.local` using an isolated database:
     persistence and reusable UI state.
 15. Generated, valid WAV, FLAC, AIFF, MP3, and OGG files: all five were parsed
     with approximately one-second durations; Chromium decoded WAV and FLAC.
+16. Cold host launch rotates stale state and starts password discovery and the
+    WebRTC broadcaster automatically.
 
 Page and console error collectors were empty in the passing live-stream run.
 Phone-width screenshots were visually inspected for the host, controller, and
 listener layouts.
+
+The installed Chromium app window was also exercised through the public GitHub
+Pages companion, not a local companion build. Listener password-to-live was
+5,996 ms, controller password-to-ready was 3,894 ms, and an acknowledged remote
+play/pause command took 165 ms. The listener received one live audio track, the
+controller selected `Arpent` on the installed app, and the gate enforces ceilings
+of 15 seconds for connection and 2 seconds for command acknowledgement.
 
 The final installed-byte rerun used the installed optimized daemon and web
 assets with a disposable database and the same static companion bundle that is
@@ -181,6 +199,15 @@ Zuradio and Deploy Zuradio Web Companion GitHub Actions workflows.
 - Temporary upload staging names hid the true extension from Lofty and managed
   digest suffixes leaked into fallback titles; staged files now preserve their
   extension and display-name inference strips the digest.
+- Discovery-channel teardown and password derivation were serialized ahead of
+  private control setup; teardown is now asynchronous and key derivation runs
+  concurrently with the control transport handshake.
+- Controller readiness waited for an independent audio receiver connection;
+  authenticated controls now become usable immediately while audio attaches in
+  parallel.
+- The distro WebKitGTK runtime omitted WebRTC at compile time. A real runtime
+  probe caught this despite successful native compilation, and the installed
+  Linux launcher now uses a dedicated Chromium app window with autoplay enabled.
 
 ## Remaining release-channel gates
 
@@ -194,6 +221,7 @@ These are intentionally not represented as completed tests:
   auto-update metadata, and supply-chain attestations before a stable native
   release.
 
-The release candidate is installed, plays and catalogs local music, exposes its
-full CLI, and uses the public static companion for the already-passing WebRTC
-path without hosting the music collection.
+The release candidate is installed, pinned, automatically broadcasting, plays
+and catalogs local music, exposes its full CLI, and uses the public static
+companion for the passing low-latency WebRTC path without hosting the music
+collection.

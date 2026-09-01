@@ -355,7 +355,6 @@ export class CompanionBridge {
 
   private async connectAttempt(mode: RemoteMode, password: string, attempt: number): Promise<void> {
     await this.disconnect();
-    this.prepareAudioAnalysis();
     this.requestedMode = mode;
     this.discoveryNonce = randomBase64Url(24);
     this.callbacks.onStatus("Finding Zuradio laptop…");
@@ -397,12 +396,11 @@ export class CompanionBridge {
       });
       await this.ensureDiscovery();
       const invitation = await beacon;
-      await rendezvous.disconnect();
       if (this.rendezvous === rendezvous) this.rendezvous = null;
       this.discoveryPeerUuid = null;
+      void rendezvous.disconnect().catch(() => undefined);
       this.invitation = invitation;
       this.callbacks.onStatus("Authenticating with laptop…");
-      this.passwordKey = await derivePasswordKey(password, invitation.passwordSalt, invitation.passwordIterations);
       const control = createSdk(invitation.controllerTransportKey, `Zuradio ${mode}`);
       this.control = control;
       this.attachErrors(control);
@@ -420,8 +418,13 @@ export class CompanionBridge {
           if (event.detail.uuid === this.controlPeerUuid) void this.sendHello(invitation);
         }) as EventListener,
       );
-      await control.connect();
-      await control.joinRoom({ room: invitation.controllerRoom, password: invitation.controllerTransportKey });
+      const passwordKey = derivePasswordKey(password, invitation.passwordSalt, invitation.passwordIterations);
+      const controlTransport = (async () => {
+        await control.connect();
+        await control.joinRoom({ room: invitation.controllerRoom, password: invitation.controllerTransportKey });
+      })();
+      const [derivedPasswordKey] = await Promise.all([passwordKey, controlTransport]);
+      this.passwordKey = derivedPasswordKey;
       const ready = new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => {
           if (this.readyWaiter?.timer === timer) this.readyWaiter = null;
@@ -685,23 +688,19 @@ export class CompanionBridge {
       } else if (this.invitation.mode === "listen" && isPublicState(message.state)) {
         this.callbacks.onNowPlaying(message.state);
       }
-      if (this.invitation.mode !== "upload") {
-        if (!isAudioRoute(message.audio)) throw new Error("Live audio route is unavailable");
-        await this.connectAudio(message.audio);
+      const mode = this.invitation.mode;
+      if (mode !== "upload" && !isAudioRoute(message.audio)) {
+        throw new Error("Live audio route is unavailable");
       }
-      this.ready = true;
-      this.callbacks.onStatus(
-        this.invitation.mode === "control"
-          ? "Controller connected"
-          : this.invitation.mode === "upload"
-            ? "Upload connected"
-            : "Listening live",
-      );
-      if (this.readyWaiter) {
-        clearTimeout(this.readyWaiter.timer);
-        this.readyWaiter.resolve();
-        this.readyWaiter = null;
+      if (mode === "control") {
+        this.markReady(mode);
+        void this.connectAudio(message.audio as AudioRoute).catch((error: unknown) => {
+          this.callbacks.onError(error instanceof Error ? error.message : "Live audio connection failed");
+        });
+        return;
       }
+      if (mode === "listen") await this.connectAudio(message.audio as AudioRoute);
+      this.markReady(mode);
     } else if (message.type === "zuradio.snapshot" && isSnapshot(message.snapshot)) {
       this.revision = message.snapshot.revision;
       this.callbacks.onSnapshot(message.snapshot);
@@ -726,6 +725,22 @@ export class CompanionBridge {
         }
       }
       this.callbacks.onError(reason);
+    }
+  }
+
+  private markReady(mode: RemoteMode): void {
+    this.ready = true;
+    this.callbacks.onStatus(
+      mode === "control"
+        ? "Controller connected"
+        : mode === "upload"
+          ? "Upload connected"
+          : "Listening live",
+    );
+    if (this.readyWaiter) {
+      clearTimeout(this.readyWaiter.timer);
+      this.readyWaiter.resolve();
+      this.readyWaiter = null;
     }
   }
 

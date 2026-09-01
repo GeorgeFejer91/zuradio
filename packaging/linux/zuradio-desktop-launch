@@ -1,6 +1,56 @@
 #!/bin/sh
 set -eu
 
+# WebKitGTK is commonly compiled without WebRTC on Linux distributions. Prefer a
+# dedicated Chromium app window so the always-on VDO.Ninja broadcaster has the
+# same complete WebRTC engine used by the qualification browser.
+runtime_file="$HOME/.local/share/zuradio/runtime.json"
+browser_profile="$HOME/.local/share/zuradio/chromium-profile"
+browser=
+
+if command -v systemctl >/dev/null 2>&1; then
+  systemctl --user start zuradio.service >/dev/null 2>&1 || true
+fi
+
+for attempt in 1 2 3 4 5 6 7 8 9 10; do
+  if [ -f "$runtime_file" ]; then
+    host_url=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["hostUrl"])' "$runtime_file" 2>/dev/null || true)
+    case "$host_url" in
+      http://127.0.0.1:*/host/\#bootstrap=*) break ;;
+      *) host_url= ;;
+    esac
+  fi
+  sleep 1
+done
+
+for candidate in \
+  "$HOME/.local/lib/zuradio/chromium/chrome" \
+  /usr/bin/brave-browser \
+  /usr/bin/google-chrome \
+  /usr/bin/chromium \
+  "$HOME"/.cache/ms-playwright/chromium-*/chrome-linux64/chrome
+do
+  if [ -x "$candidate" ]; then
+    browser=$candidate
+    break
+  fi
+done
+
+if [ -n "${host_url:-}" ] && [ -n "$browser" ]; then
+  mkdir -p "$browser_profile"
+  exec "$browser" \
+    --app="$host_url" \
+    --class=zuradio-desktop \
+    --name=zuradio-desktop \
+    --user-data-dir="$browser_profile" \
+    --autoplay-policy=no-user-gesture-required \
+    --disable-extensions \
+    --disable-component-extensions-with-background-pages \
+    --disable-session-crashed-bubble \
+    --no-default-browser-check \
+    --no-first-run
+fi
+
 native_desktop="$HOME/.local/lib/zuradio/zuradio-desktop"
 if [ -x "$native_desktop" ]; then
   exec "$native_desktop"

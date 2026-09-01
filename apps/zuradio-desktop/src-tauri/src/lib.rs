@@ -31,7 +31,10 @@ pub fn run() {
                     .min_inner_size(820.0, 560.0)
                     .on_navigation(move |url| is_allowed_navigation(url, &navigation_port))
                     .build()?;
+            #[cfg(target_os = "linux")]
             enable_desktop_media_bridge(&window)?;
+            #[cfg(not(target_os = "linux"))]
+            enable_desktop_media_bridge(&window);
 
             let data_dir = zuradio_daemon::default_data_dir();
             let web_root = resolve_web_root(app)?;
@@ -109,9 +112,7 @@ fn enable_desktop_media_bridge(window: &WebviewWindow) -> tauri::Result<()> {
 }
 
 #[cfg(not(target_os = "linux"))]
-fn enable_desktop_media_bridge(_window: &WebviewWindow) -> tauri::Result<()> {
-    Ok(())
-}
+fn enable_desktop_media_bridge(_window: &WebviewWindow) {}
 
 async fn discover_running_host(data_dir: PathBuf) -> Option<String> {
     tauri::async_runtime::spawn_blocking(move || {

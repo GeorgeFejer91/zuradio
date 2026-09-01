@@ -14,6 +14,8 @@ if (!passwordPath) throw new Error("ZURADIO_TEST_PASSWORD_FILE must name the dae
 const password = fs.readFileSync(passwordPath, "utf8").replace(/[\r\n]+$/, "");
 const initialTrackCount = process.env.ZURADIO_FORMAT_FIXTURES === "1" ? 8 : 3;
 const companionBase = process.env.ZURADIO_COMPANION_BASE ?? "http://127.0.0.1:4173";
+const MAX_CONNECT_LATENCY_MS = 15_000;
+const MAX_COMMAND_RTT_MS = 2_000;
 
 test("streams from the laptop while enforcing listener and controller roles", async ({ browser }) => {
   test.setTimeout(180_000);
@@ -45,8 +47,11 @@ test("streams from the laptop while enforcing listener and controller roles", as
     await expect(listener.getByLabel("Remote player controls")).toHaveCount(0);
     await expect(listener.getByRole("navigation", { name: "Controller sections" })).toHaveCount(0);
     await listener.getByTestId("password").fill(password);
+    const listenerConnectStarted = Date.now();
     await listener.getByTestId("connect").click();
     await expect(listener.getByText("Listening live", { exact: true })).toBeVisible({ timeout: 45_000 });
+    const listenerConnectMs = Date.now() - listenerConnectStarted;
+    expect(listenerConnectMs, "listener password-to-live latency").toBeLessThan(MAX_CONNECT_LATENCY_MS);
     await expect(listener.getByText(/Listen access is read-only/)).toBeVisible();
     await expect(listener.getByTestId("companion-visualizer")).toBeVisible();
     await expect(listener.getByTestId("companion-title")).toHaveText(firstTitle, { timeout: 20_000 });
@@ -62,8 +67,11 @@ test("streams from the laptop while enforcing listener and controller roles", as
     await controller.setViewportSize({ width: 390, height: 844 });
     await controller.getByTestId("connect-control").click();
     await controller.getByTestId("password").fill(password);
+    const controllerConnectStarted = Date.now();
     await controller.getByTestId("connect").click();
     await expect(controller.getByText("Controller connected", { exact: true })).toBeVisible({ timeout: 45_000 });
+    const controllerConnectMs = Date.now() - controllerConnectStarted;
+    expect(controllerConnectMs, "controller password-to-ready latency").toBeLessThan(MAX_CONNECT_LATENCY_MS);
     await expect(controller.getByTestId("companion-visualizer")).toBeVisible();
     await expect(controller.locator(".controller-panel .track-row")).toHaveCount(initialTrackCount);
     const remotePlayPause = controller.getByTestId("remote-play-pause");
@@ -73,9 +81,12 @@ test("streams from the laptop while enforcing listener and controller roles", as
     }
     await expect(remotePlayPause).toHaveText("Pause");
 
+    const commandStarted = Date.now();
     await remotePlayPause.click();
     await expect(remotePlayPause).toHaveText("Play");
     await expect(host.getByTestId("play-pause")).toHaveAttribute("aria-label", "Play");
+    const commandRttMs = Date.now() - commandStarted;
+    expect(commandRttMs, "remote command acknowledgement latency").toBeLessThan(MAX_COMMAND_RTT_MS);
     await remotePlayPause.click();
     await expect(host.getByTestId("play-pause")).toHaveAttribute("aria-label", "Pause");
 
@@ -190,6 +201,10 @@ test("streams from the laptop while enforcing listener and controller roles", as
 
     await controller.screenshot({ path: "test-results/mobile-controller.png", fullPage: true });
     await listener.screenshot({ path: "test-results/mobile-listener.png", fullPage: true });
+    await test.info().attach("latency-metrics.json", {
+      body: JSON.stringify({ listenerConnectMs, controllerConnectMs, commandRttMs }, null, 2),
+      contentType: "application/json",
+    });
 
     await controller.getByRole("button", { name: "Disconnect", exact: true }).click();
     await listener.getByRole("button", { name: "Disconnect", exact: true }).click();
