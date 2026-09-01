@@ -1,6 +1,0 @@
-<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 256 256" role="img" aria-label="Zuradio">
-  <rect width="256" height="256" rx="48" fill="#171714"/>
-  <path d="M54 65h95L83 171h102" fill="none" stroke="#f2f0e8" stroke-width="25" stroke-linecap="round" stroke-linejoin="round"/>
-  <circle cx="179" cy="78" r="20" fill="#e09a50"/>
-  <path d="M166 119c17 9 27 27 27 47s-10 38-27 47M190 101c24 14 39 38 39 65s-15 51-39 65" fill="none" stroke="#e09a50" stroke-width="11" stroke-linecap="round"/>
-</svg>
