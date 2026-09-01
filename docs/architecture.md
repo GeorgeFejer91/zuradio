@@ -77,21 +77,22 @@ adapter can replace it without changing domain commands or remote authorization.
 
 ## Password proof and modes
 
-Starting a broadcast creates unrelated high-entropy transport coordinates for:
+Starting a broadcast creates:
 
-1. the control/data route used to authenticate all companions;
-2. the live audio route returned only after listen/control authentication; and
-3. fresh listen, control, and upload invitations bound to the current epoch.
+1. a deterministic password-derived, data-only rendezvous route;
+2. an unrelated high-entropy private control/data route; and
+3. an unrelated high-entropy live audio route returned only after
+   listen/control authentication.
 
-A link stores routing data, a random PBKDF2 salt, and its mode in the URL
-fragment, which GitHub Pages never receives as an HTTP request target. It stores
-neither the local password nor a derived key. Every companion proves the same
-local password with HMAC over a versioned transcript that includes session,
-epoch, mode, peer ID, and nonce. Rust returns a server proof and creates a
-short, revocable mode-scoped grant. Every action/upload also carries a strictly
-increasing sequence. Upload grants cannot control or listen; listener grants
-cannot inspect the library or mutate it; only listen/control receive the live
-audio route.
+The browser derives the rendezvous coordinates only after a mode button and
+password gesture. A nonce-bound beacon returns the fresh private coordinates
+over the exact peer data channel with WebSocket fallback disabled. Every
+companion then proves the same local password with HMAC over a versioned
+transcript that includes session, epoch, mode, peer ID, and nonce. Rust returns
+a server proof and creates a short, revocable mode-scoped grant. Every
+action/upload also carries a strictly increasing sequence. Upload grants cannot
+control or listen; listener grants cannot inspect the library or mutate it;
+only listen/control receive the live audio route.
 
 ## Offline behavior
 

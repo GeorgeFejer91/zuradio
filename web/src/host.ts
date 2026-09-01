@@ -4,6 +4,7 @@ import { ZuradioApi } from "./api";
 import { AudioEngine } from "./audio-engine";
 import type { Action, AppSnapshot, BroadcastSession, Playlist, Track } from "./types";
 import { HostBroadcastBridge } from "./vdo";
+import { renderSoundVisualizer, SvgSoundVisualizer } from "./visualizer";
 
 type View = "library" | "albums" | "artists" | "playlists" | "favorites" | "history" | "broadcast";
 
@@ -37,6 +38,7 @@ const audio = new AudioEngine(
     updateProgress();
   },
 );
+const visualizer = new SvgSoundVisualizer();
 
 const bridge = new HostBroadcastBridge({
   snapshot: () => {
@@ -206,7 +208,7 @@ async function handleClick(target: HTMLElement): Promise<void> {
       await bridge.stop();
       await api.stopBroadcast();
       broadcastSession = null;
-      showMessage("Broadcast stopped; old invitations are revoked", false);
+      showMessage("Broadcast stopped; remote connections are revoked", false);
       render();
     });
     return;
@@ -364,6 +366,7 @@ function render(): void {
     ${editingTrackId ? renderMetadataEditor(snapshot) : ""}
     <div class="status-line${message?.error ? " error" : ""}" role="status" aria-live="polite" ${message ? "" : "hidden"}>${escapeHtml(message?.text ?? "")}</div>
   `;
+  visualizer.mount(root.querySelector<SVGSVGElement>("[data-testid='host-visualizer']"), audio);
   updateProgress();
 }
 
@@ -525,25 +528,20 @@ function renderBroadcast(): string {
     return `<section class="broadcast-panel">
       <h2>Broadcast</h2>
       <div class="broadcast-status"><strong>Off</strong><p class="muted">No remote peer can hear or control this laptop.</p></div>
-      <p>Starting a broadcast creates fresh password-gated listen, control, and upload invitations. Music stays on this laptop; the companion receives live audio or sends files directly to this app.</p>
+      <p>Starting a broadcast makes this laptop discoverable from the Zuradio Web Companion after a listener enters the shared password. Music always stays on this laptop.</p>
       <button class="primary" data-action="start-broadcast" data-testid="start-broadcast" ${disabled()}>Start broadcast</button>
     </section>`;
   }
   return `<section class="broadcast-panel">
     <h2>Broadcast</h2>
-    <div class="broadcast-status live"><strong>Live</strong><p class="muted">Audio originates from this player. Stopping revokes every invitation and partial upload.</p></div>
+    <div class="broadcast-status live"><strong>Live</strong><p class="muted">Password discovery is active. Stopping revokes every connection and partial upload.</p></div>
     <button class="danger" data-action="stop-broadcast" data-testid="stop-broadcast" ${disabled()}>Stop broadcast</button>
-    ${renderInvitation("Listener invitation", "Listen only; no player or playlist controls.", broadcastSession.listenerInvitation, "listener-invitation")}
-    ${renderInvitation("Controller invitation", "Can listen and use the typed player, queue, and playlist controls.", broadcastSession.controllerInvitation, "controller-invitation")}
-    ${renderInvitation("Upload invitation", "Can select files or a folder and add supported music to this laptop.", broadcastSession.uploadInvitation, "upload-invitation")}
+    <div class="access-modes" data-testid="access-modes">
+      <div><strong>Listen</strong><span>Live audio and current track</span></div>
+      <div><strong>Control</strong><span>Player, queue, library and playlists</span></div>
+      <div><strong>Upload</strong><span>Send folders or music files to this laptop</span></div>
+    </div>
   </section>`;
-}
-
-function renderInvitation(label: string, description: string, value: string, testId: string): string {
-  return `<div class="invitation"><label>${label}</label><p class="muted">${description}</p><div class="invitation-row">
-    <input readonly data-testid="${testId}" value="${escapeAttribute(value)}" aria-label="${label}" />
-    <button data-action="copy" data-value="${escapeAttribute(value)}">Copy</button>
-  </div></div>`;
 }
 
 function renderQueue(state: AppSnapshot): string {
@@ -576,6 +574,7 @@ function renderPlayer(state: AppSnapshot): string {
       <div class="now-copy"><strong data-testid="now-title">${escapeHtml(track?.title ?? "Nothing playing")}</strong><span>${escapeHtml(track?.artist ?? "Choose a track from the library")}</span></div>
     </div>
     <div class="transport">
+      ${renderSoundVisualizer("host-visualizer")}
       <div class="transport-buttons">
         <button class="icon" data-action="previous" aria-label="Previous track">⏮</button>
         <button class="icon" data-action="${playing ? "pause" : "play"}" data-testid="play-pause" aria-label="${playing ? "Pause" : "Play"}">${playing ? "❚❚" : "▶"}</button>
@@ -689,5 +688,6 @@ function messageOf(error: unknown): string {
 
 window.addEventListener("pagehide", () => {
   void bridge.stop();
+  visualizer.destroy();
   audio.destroy();
 });

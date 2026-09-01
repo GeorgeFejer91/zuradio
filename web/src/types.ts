@@ -115,14 +115,14 @@ export interface BroadcastSession {
   listenRoom: string;
   listenStream: string;
   listenTransportKey: string;
+  rendezvousRoom: string;
+  rendezvousStream: string;
+  rendezvousTransportKey: string;
   controllerRoom: string;
   controllerStream: string;
   controllerTransportKey: string;
   passwordSalt: string;
   passwordIterations: number;
-  listenerInvitation: string;
-  controllerInvitation: string;
-  uploadInvitation: string;
 }
 
 export interface WireErrorShape {

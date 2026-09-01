@@ -4,11 +4,13 @@ Status: protocol version 2, 2026-09-01.
 
 ## Modes and trust boundary
 
-Starting a broadcast creates fresh, unrelated invitations for `listen`,
-`control`, and `upload`. Each invitation contains routing coordinates, a random
-PBKDF2 salt, and the mode, but no password or password-derived key. GitHub Pages
-serves only the static companion. Music bytes move directly between the remote
-browser and the laptop over VDO.Ninja's encrypted WebRTC data channel.
+Starting a broadcast activates a password-derived data-only rendezvous plus
+fresh, unrelated private control and audio routes. The companion exposes only
+`listen`, `control`, and `upload` buttons. After a password gesture, a
+requester/nonce-bound rendezvous beacon supplies current private coordinates;
+there are no invitation URLs. GitHub Pages serves only the static companion.
+Music bytes move directly between the remote browser and the laptop over
+VDO.Ninja's encrypted WebRTC data channel.
 
 The browser derives a 256-bit key with PBKDF2-HMAC-SHA-256 using 210,000
 iterations, then proves it with HMAC over the versioned session, epoch, mode,

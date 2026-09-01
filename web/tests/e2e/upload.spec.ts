@@ -15,18 +15,19 @@ const password = fs.readFileSync(passwordPath, "utf8").replace(/[\r\n]+$/, "");
 const fixture = process.env.ZURADIO_UPLOAD_FIXTURE;
 const fixtureFolder = process.env.ZURADIO_UPLOAD_FOLDER;
 const expectedTitle = process.env.ZURADIO_UPLOAD_EXPECTED_TITLE ?? "Zuradio Upload Fixture";
+const companionBase = process.env.ZURADIO_COMPANION_BASE ?? "http://127.0.0.1:4173";
 
 test("rejects a wrong password before exposing live audio", async ({ browser }) => {
   test.setTimeout(70_000);
   const host = await authenticatedHost(browser);
   try {
     await startFreshBroadcast(host);
-    const invitation = await host.getByTestId("listener-invitation").inputValue();
     const companion = await browser.newPage();
-    await companion.goto(invitation);
+    await companion.goto(companionBase);
+    await companion.getByTestId("connect-listen").click();
     await companion.getByTestId("password").fill("definitely-the-wrong-password");
     await companion.getByTestId("connect").click();
-    await expect(companion.getByRole("alert")).toContainText(/invalid proof/i, { timeout: 30_000 });
+    await expect(companion.getByRole("alert")).toContainText(/No active Zuradio broadcast/i, { timeout: 35_000 });
     const hasAudio = await companion.evaluate(() => {
       const audio = document.querySelector<HTMLAudioElement>('audio[aria-label="Live Zuradio audio"]');
       return Boolean(audio?.srcObject && (audio.srcObject as MediaStream).getAudioTracks().length);
@@ -43,9 +44,9 @@ test("uploads a tagged music file and exposes the catalogued result", async ({ b
   const host = await authenticatedHost(browser);
   try {
     await startFreshBroadcast(host);
-    const invitation = await host.getByTestId("upload-invitation").inputValue();
     const uploader = await browser.newPage();
-    await uploader.goto(invitation);
+    await uploader.goto(companionBase);
+    await uploader.getByTestId("connect-upload").click();
     await uploader.getByTestId("password").fill(password);
     await uploader.getByTestId("connect").click();
     await expect(uploader.getByText("Upload connected", { exact: true })).toBeVisible({ timeout: 45_000 });
@@ -78,9 +79,9 @@ test("selects a folder, ignores non-audio files, and imports every track", async
   const host = await authenticatedHost(browser);
   try {
     await startFreshBroadcast(host);
-    const invitation = await host.getByTestId("upload-invitation").inputValue();
     const uploader = await browser.newPage();
-    await uploader.goto(invitation);
+    await uploader.goto(companionBase);
+    await uploader.getByTestId("connect-upload").click();
     await uploader.getByTestId("password").fill(password);
     await uploader.getByTestId("connect").click();
     await expect(uploader.getByText("Upload connected", { exact: true })).toBeVisible({ timeout: 45_000 });
@@ -110,7 +111,6 @@ async function startFreshBroadcast(host: Page): Promise<void> {
 }
 
 async function stopBroadcast(host: Page): Promise<void> {
-  if (await host.getByTestId("stop-broadcast").isVisible().catch(() => false)) {
-    await host.getByTestId("stop-broadcast").click().catch(() => undefined);
-  }
+  await host.evaluate(() => fetch("/api/v1/broadcast/stop", { method: "POST" })).catch(() => undefined);
+  await host.close().catch(() => undefined);
 }

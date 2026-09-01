@@ -30,8 +30,9 @@ but does not receive arbitrary filesystem or process authority.
   limits, content types, and response security headers.
 - Read the password only from a private local file, reject group/other-readable
   Unix permissions, and never return, log, persist in the database, or include
-  it in invitations. Derive a per-invitation key with PBKDF2 and compare mutual
-  HMAC proofs in constant time.
+  it in a URL. Derive rendezvous coordinates and a per-session proof key with
+  domain-separated PBKDF2/HMAC operations and compare mutual proofs in constant
+  time.
 - Generate broadcast routing credentials from operating-system randomness, keep
   them memory-only, and discard them on Stop or process exit. Keep mode, scope,
   expiry, peer binding, broadcast epoch, and replay sequence in Rust.
@@ -49,6 +50,10 @@ but does not receive arbitrary filesystem or process authority.
   close peers, clear grants, and release the audio graph on stop/page shutdown.
 - Never put access keys in query strings, logs, local storage, analytics, crash
   reports, or GitHub Pages configuration.
+- Treat password-derived discovery as a rendezvous hint, not identity. Bind
+  beacons to the requester UUID and nonce, disable signaling fallback, return
+  fresh private coordinates, and require Rust authorization on that private
+  route. A long unique password remains required because this is not a PAKE.
 - Do not register a service worker that caches media, catalog, state, or secrets.
 
 ## GitHub Pages limitation

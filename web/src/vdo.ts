@@ -1,4 +1,5 @@
 import VDONinja, { type VDONinjaEvent } from "@vdoninja/sdk";
+import { deriveRendezvousRoute } from "./rendezvous";
 import type {
   Action,
   ActionRequest,
@@ -47,10 +48,21 @@ interface ReadyWaiter {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface BeaconWaiter {
+  resolve(invitation: CompanionInvitation): void;
+  reject(error: Error): void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 interface AudioRoute {
   room: string;
   stream: string;
   transportKey: string;
+}
+
+interface PendingHello {
+  message: MessageRecord;
+  serverProof: string;
 }
 
 export interface UploadProgress {
@@ -63,6 +75,7 @@ export interface UploadProgress {
 
 export class HostBroadcastBridge {
   private listen: VDONinja | null = null;
+  private rendezvous: VDONinja | null = null;
   private control: VDONinja | null = null;
   private session: BroadcastSession | null = null;
   private grants = new Map<string, HostGrant>();
@@ -73,10 +86,13 @@ export class HostBroadcastBridge {
     await this.stop();
     this.session = session;
     const listen = createSdk(session.listenTransportKey, "Zuradio listen host");
+    const rendezvous = createSdk(session.rendezvousTransportKey, "Zuradio rendezvous host");
     const control = createSdk(session.controllerTransportKey, "Zuradio remote host");
     this.listen = listen;
+    this.rendezvous = rendezvous;
     this.control = control;
     this.attachErrors(listen);
+    this.attachErrors(rendezvous);
     this.attachErrors(control);
     listen.addEventListener(
       "dataChannelOpen",
@@ -85,6 +101,12 @@ export class HostBroadcastBridge {
           { type: "zuradio.state", state: nowPlaying(this.callbacks.snapshot()) },
           { uuid: event.detail.uuid, allowFallback: false },
         );
+      }) as EventListener,
+    );
+    rendezvous.addEventListener(
+      "dataReceived",
+      ((event: VDONinjaEvent<"dataReceived">) => {
+        this.handleDiscovery(event.detail.uuid, event.detail.data);
       }) as EventListener,
     );
     control.addEventListener(
@@ -99,9 +121,10 @@ export class HostBroadcastBridge {
         this.grants.delete(event.detail.uuid);
       }) as EventListener,
     );
-    await Promise.all([listen.connect(), control.connect()]);
+    await Promise.all([listen.connect(), rendezvous.connect(), control.connect()]);
     await Promise.all([
       listen.joinRoom({ room: session.listenRoom, password: session.listenTransportKey }),
+      rendezvous.joinRoom({ room: session.rendezvousRoom, password: session.rendezvousTransportKey }),
       control.joinRoom({ room: session.controllerRoom, password: session.controllerTransportKey }),
     ]);
     await listen.publish(stream, {
@@ -116,6 +139,12 @@ export class HostBroadcastBridge {
       streamID: session.controllerStream,
       password: session.controllerTransportKey,
       label: "Zuradio remote bridge",
+    });
+    await rendezvous.announce({
+      room: session.rendezvousRoom,
+      streamID: session.rendezvousStream,
+      password: session.rendezvousTransportKey,
+      label: "Zuradio password rendezvous",
     });
     this.publishState(this.callbacks.snapshot());
   }
@@ -133,12 +162,41 @@ export class HostBroadcastBridge {
     this.session = null;
     this.grants.clear();
     const listen = this.listen;
+    const rendezvous = this.rendezvous;
     const control = this.control;
     this.listen = null;
+    this.rendezvous = null;
     this.control = null;
     listen?.stopPublishing();
+    rendezvous?.stopPublishing();
     control?.stopPublishing();
-    await Promise.allSettled([listen?.disconnect(), control?.disconnect()]);
+    await Promise.allSettled([listen?.disconnect(), rendezvous?.disconnect(), control?.disconnect()]);
+  }
+
+  private handleDiscovery(uuid: string, raw: unknown): void {
+    const message = parseMessage(raw);
+    if (!message || !this.session || message.type !== "zuradio.discover") return;
+    try {
+      const nonce = stringField(message, "nonce", 128);
+      const mode = modeField(message, "mode");
+      this.rendezvous?.sendData(
+        {
+          type: "zuradio.beacon",
+          nonce,
+          mode,
+          session: this.session.sessionId,
+          epoch: this.session.epoch,
+          controllerRoom: this.session.controllerRoom,
+          controllerStream: this.session.controllerStream,
+          controllerTransportKey: this.session.controllerTransportKey,
+          passwordSalt: this.session.passwordSalt,
+          passwordIterations: this.session.passwordIterations,
+        },
+        { uuid, allowFallback: false },
+      );
+    } catch {
+      // Malformed discovery traffic is intentionally ignored on the public rendezvous plane.
+    }
   }
 
   private async handleControl(uuid: string, raw: unknown): Promise<void> {
@@ -235,6 +293,7 @@ export interface CompanionCallbacks {
 
 export class CompanionBridge {
   private listen: VDONinja | null = null;
+  private rendezvous: VDONinja | null = null;
   private control: VDONinja | null = null;
   private invitation: CompanionInvitation | null = null;
   private peerId = crypto.randomUUID();
@@ -245,13 +304,25 @@ export class CompanionBridge {
   private helloSending = false;
   private passwordKey: Uint8Array<ArrayBuffer> | null = null;
   private pendingServerProof: string | null = null;
+  private pendingHello: PendingHello | null = null;
   private pendingRequests = new Map<number, PendingRequest>();
   private readyWaiter: ReadyWaiter | null = null;
+  private beaconWaiter: BeaconWaiter | null = null;
+  private discoveryNonce: string | null = null;
+  private requestedMode: RemoteMode | null = null;
+  private discoveryPeerUuid: string | null = null;
+  private controlPeerUuid: string | null = null;
+  private analysisContext: AudioContext | null = null;
+  private analysisSource: MediaStreamAudioSourceNode | null = null;
+  private analysisAnalyser: AnalyserNode | null = null;
+  private analysisData: Uint8Array<ArrayBuffer> | null = null;
 
   constructor(
     private readonly audio: HTMLAudioElement,
     private readonly callbacks: CompanionCallbacks,
-  ) {}
+  ) {
+    this.audio.addEventListener("play", () => void this.analysisContext?.resume());
+  }
 
   get mode(): RemoteMode | null {
     return this.ready ? (this.invitation?.mode ?? null) : null;
@@ -265,48 +336,116 @@ export class CompanionBridge {
     return this.mode === "upload";
   }
 
-  async connect(invitation: CompanionInvitation, password: string): Promise<void> {
+  readSpectrum(target: Uint8Array): boolean {
+    if (!this.analysisAnalyser || !this.analysisData || this.audio.paused) return false;
+    this.analysisAnalyser.getByteFrequencyData(this.analysisData);
+    projectSpectrum(this.analysisData, target);
+    return true;
+  }
+
+  async connect(mode: RemoteMode, password: string): Promise<void> {
+    return this.connectAttempt(mode, password, 0);
+  }
+
+  private async connectAttempt(mode: RemoteMode, password: string, attempt: number): Promise<void> {
     await this.disconnect();
-    this.invitation = invitation;
-    this.callbacks.onStatus("Authenticating with laptop…");
-    this.passwordKey = await derivePasswordKey(password, invitation.passwordSalt, invitation.passwordIterations);
-    const control = createSdk(invitation.controllerTransportKey, `Zuradio ${invitation.mode}`);
-    this.control = control;
-    this.attachErrors(control);
-    control.addEventListener(
+    this.prepareAudioAnalysis();
+    this.requestedMode = mode;
+    this.discoveryNonce = randomBase64Url(24);
+    this.callbacks.onStatus("Finding Zuradio laptop…");
+    const route = await deriveRendezvousRoute(password);
+    const rendezvous = createSdk(route.transportKey, "Zuradio password rendezvous");
+    this.rendezvous = rendezvous;
+    this.attachErrors(rendezvous);
+    rendezvous.addEventListener(
       "dataReceived",
       ((event: VDONinjaEvent<"dataReceived">) => {
-        void this.handleControlMessage(event.detail.data);
+        if (!this.discoveryPeerUuid || event.detail.uuid !== this.discoveryPeerUuid) return;
+        this.handleRendezvousMessage(event.detail.data);
       }) as EventListener,
     );
-    control.addEventListener(
+    rendezvous.addEventListener(
       "dataChannelOpen",
-      (() => {
-        void this.sendHello(invitation);
+      ((event: VDONinjaEvent<"dataChannelOpen">) => {
+        this.discoveryPeerUuid ??= event.detail.uuid;
+        if (event.detail.uuid === this.discoveryPeerUuid) this.sendDiscovery();
       }) as EventListener,
     );
-    await control.connect();
-    await control.joinRoom({ room: invitation.controllerRoom, password: invitation.controllerTransportKey });
-    const ready = new Promise<void>((resolve, reject) => {
+    await rendezvous.connect();
+    await rendezvous.joinRoom({ room: route.room, password: route.transportKey });
+    const beacon = new Promise<CompanionInvitation>((resolve, reject) => {
       const timer = setTimeout(() => {
-        if (this.readyWaiter?.timer === timer) this.readyWaiter = null;
-        reject(new Error("The laptop did not complete authentication"));
+        if (this.beaconWaiter?.timer === timer) this.beaconWaiter = null;
+        reject(new Error("No active Zuradio broadcast found for this password"));
       }, 20_000);
-      this.readyWaiter = { resolve, reject, timer };
+      this.beaconWaiter = { resolve, reject, timer };
     });
     try {
+      await rendezvous.view(route.stream, {
+        audio: false,
+        video: false,
+        dataOnly: true,
+        downloads: false,
+        allowresources: false,
+        label: `Zuradio ${mode}`,
+      });
+      await this.ensureDiscovery();
+      const invitation = await beacon;
+      await rendezvous.disconnect();
+      if (this.rendezvous === rendezvous) this.rendezvous = null;
+      this.discoveryPeerUuid = null;
+      this.invitation = invitation;
+      this.callbacks.onStatus("Authenticating with laptop…");
+      this.passwordKey = await derivePasswordKey(password, invitation.passwordSalt, invitation.passwordIterations);
+      const control = createSdk(invitation.controllerTransportKey, `Zuradio ${mode}`);
+      this.control = control;
+      this.attachErrors(control);
+      control.addEventListener(
+        "dataReceived",
+        ((event: VDONinjaEvent<"dataReceived">) => {
+          if (!this.controlPeerUuid || event.detail.uuid !== this.controlPeerUuid) return;
+          void this.handleControlMessage(event.detail.data);
+        }) as EventListener,
+      );
+      control.addEventListener(
+        "dataChannelOpen",
+        ((event: VDONinjaEvent<"dataChannelOpen">) => {
+          this.controlPeerUuid ??= event.detail.uuid;
+          if (event.detail.uuid === this.controlPeerUuid) void this.sendHello(invitation);
+        }) as EventListener,
+      );
+      await control.connect();
+      await control.joinRoom({ room: invitation.controllerRoom, password: invitation.controllerTransportKey });
+      const ready = new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(() => {
+          if (this.readyWaiter?.timer === timer) this.readyWaiter = null;
+          reject(new Error("The laptop did not complete authentication"));
+        }, 12_000);
+        this.readyWaiter = { resolve, reject, timer };
+      });
       await control.view(invitation.controllerStream, {
         audio: false,
         video: false,
         dataOnly: true,
         downloads: false,
         allowresources: false,
-        label: `Zuradio ${invitation.mode}`,
+        label: `Zuradio ${mode}`,
       });
       await this.ensureHello(invitation);
-      await ready;
+      const helloRetry = window.setInterval(() => void this.sendHello(invitation), 1_000);
+      try {
+        await ready;
+      } finally {
+        window.clearInterval(helloRetry);
+      }
     } catch (error) {
+      const privateRouteWasReached = this.invitation !== null;
       await this.disconnect();
+      if (privateRouteWasReached && attempt < 1) {
+        this.callbacks.onStatus("Reconnecting to Zuradio laptop…");
+        await delay(600);
+        return this.connectAttempt(mode, password, attempt + 1);
+      }
       throw error;
     }
   }
@@ -388,12 +527,22 @@ export class CompanionBridge {
     this.helloSending = false;
     this.sequence = 1;
     this.pendingServerProof = null;
+    this.pendingHello = null;
+    this.discoveryNonce = null;
+    this.requestedMode = null;
+    this.discoveryPeerUuid = null;
+    this.controlPeerUuid = null;
     this.passwordKey?.fill(0);
     this.passwordKey = null;
     if (this.readyWaiter) {
       clearTimeout(this.readyWaiter.timer);
       this.readyWaiter.reject(new Error("Remote connection closed"));
       this.readyWaiter = null;
+    }
+    if (this.beaconWaiter) {
+      clearTimeout(this.beaconWaiter.timer);
+      this.beaconWaiter.reject(new Error("Remote connection closed"));
+      this.beaconWaiter = null;
     }
     for (const pending of this.pendingRequests.values()) {
       clearTimeout(pending.timer);
@@ -402,12 +551,62 @@ export class CompanionBridge {
     this.pendingRequests.clear();
     this.audio.pause();
     this.audio.srcObject = null;
+    this.analysisSource?.disconnect();
+    this.analysisSource = null;
+    this.analysisAnalyser = null;
+    this.analysisData = null;
+    const analysisContext = this.analysisContext;
+    this.analysisContext = null;
     const listen = this.listen;
+    const rendezvous = this.rendezvous;
     const control = this.control;
     this.listen = null;
+    this.rendezvous = null;
     this.control = null;
     this.invitation = null;
-    await Promise.allSettled([listen?.disconnect(), control?.disconnect()]);
+    await Promise.allSettled([
+      listen?.disconnect(),
+      rendezvous?.disconnect(),
+      control?.disconnect(),
+      analysisContext?.close(),
+    ]);
+  }
+
+  private async ensureDiscovery(): Promise<void> {
+    for (let attempt = 0; attempt < 60 && this.beaconWaiter; attempt += 1) {
+      if (this.sendDiscovery()) return;
+      await delay(250);
+    }
+    if (this.beaconWaiter) throw new Error("The Zuradio rendezvous channel is not ready");
+  }
+
+  private sendDiscovery(): boolean {
+    if (!this.rendezvous || !this.discoveryPeerUuid || !this.discoveryNonce || !this.requestedMode) return false;
+    return this.rendezvous.sendData(
+      { type: "zuradio.discover", nonce: this.discoveryNonce, mode: this.requestedMode },
+      { uuid: this.discoveryPeerUuid, allowFallback: false },
+    );
+  }
+
+  private handleRendezvousMessage(raw: unknown): void {
+    const message = parseMessage(raw);
+    if (
+      !message ||
+      message.type !== "zuradio.beacon" ||
+      !this.beaconWaiter ||
+      !this.discoveryNonce ||
+      !this.requestedMode ||
+      message.nonce !== this.discoveryNonce ||
+      message.mode !== this.requestedMode
+    ) return;
+    try {
+      const invitation = beaconInvitation(message, this.requestedMode);
+      clearTimeout(this.beaconWaiter.timer);
+      this.beaconWaiter.resolve(invitation);
+      this.beaconWaiter = null;
+    } catch {
+      // Ignore malformed or unbound rendezvous responses and continue waiting.
+    }
   }
 
   private async ensureHello(invitation: CompanionInvitation): Promise<void> {
@@ -419,27 +618,34 @@ export class CompanionBridge {
   }
 
   private async sendHello(invitation: CompanionInvitation): Promise<boolean> {
-    if (this.helloSent || this.ready) return true;
-    if (!this.control || !this.passwordKey || this.helloSending) return false;
+    if (this.ready) return true;
+    if (!this.control || !this.controlPeerUuid || !this.passwordKey || this.helloSending) return false;
     this.helloSending = true;
-    const clientNonce = randomBase64Url(24);
-    const transcript = `zuradio/2|${invitation.session}|${invitation.epoch}|${invitation.mode}|${this.peerId}|${clientNonce}`;
     try {
-      const proof = await hmac(this.passwordKey, transcript);
-      const serverProof = await hmac(this.passwordKey, `${transcript}|accepted`);
-      const sent = this.control.sendData({
-        type: "zuradio.hello",
-        sessionId: invitation.session,
-        mode: invitation.mode,
-        peerId: this.peerId,
-        clientNonce,
-        proof,
-      });
+      if (!this.pendingHello) {
+        const clientNonce = randomBase64Url(24);
+        const transcript = `zuradio/2|${invitation.session}|${invitation.epoch}|${invitation.mode}|${this.peerId}|${clientNonce}`;
+        const proof = await hmac(this.passwordKey, transcript);
+        const serverProof = await hmac(this.passwordKey, `${transcript}|accepted`);
+        this.pendingHello = {
+          message: {
+            type: "zuradio.hello",
+            sessionId: invitation.session,
+            mode: invitation.mode,
+            peerId: this.peerId,
+            clientNonce,
+            proof,
+          },
+          serverProof,
+        };
+      }
+      const sent = this.control.sendData(
+        this.pendingHello.message,
+        { uuid: this.controlPeerUuid, allowFallback: false },
+      );
       if (!sent) return false;
-      this.pendingServerProof = serverProof;
+      this.pendingServerProof = this.pendingHello.serverProof;
       this.helloSent = true;
-      this.passwordKey.fill(0);
-      this.passwordKey = null;
       return true;
     } finally {
       this.helloSending = false;
@@ -450,6 +656,7 @@ export class CompanionBridge {
     const message = parseMessage(raw);
     if (!message) return;
     if (message.type === "zuradio.ready") {
+      if (this.ready) return;
       if (
         !this.invitation ||
         !this.pendingServerProof ||
@@ -462,6 +669,9 @@ export class CompanionBridge {
         return;
       }
       this.pendingServerProof = null;
+      this.pendingHello = null;
+      this.passwordKey?.fill(0);
+      this.passwordKey = null;
       if (this.invitation.mode === "control") {
         if (!isSnapshot(message.snapshot)) throw new Error("Controller state is unavailable");
         this.revision = message.snapshot.revision;
@@ -521,7 +731,9 @@ export class CompanionBridge {
       "track",
       ((event: VDONinjaEvent<"track">) => {
         if (event.detail.track.kind !== "audio") return;
-        this.audio.srcObject = new MediaStream([event.detail.track]);
+        const stream = new MediaStream([event.detail.track]);
+        this.audio.srcObject = stream;
+        this.attachAudioAnalysis(stream);
         void this.audio.play().catch(() => this.callbacks.onStatus("Tap play to hear the live stream"));
       }) as EventListener,
     );
@@ -545,13 +757,42 @@ export class CompanionBridge {
     });
   }
 
+  private prepareAudioAnalysis(): void {
+    if (this.analysisContext) return;
+    const context = new AudioContext({ latencyHint: "playback" });
+    const analyser = context.createAnalyser();
+    const silent = context.createGain();
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.74;
+    silent.gain.value = 0;
+    analyser.connect(silent);
+    silent.connect(context.destination);
+    this.analysisContext = context;
+    this.analysisAnalyser = analyser;
+    this.analysisData = new Uint8Array(analyser.frequencyBinCount);
+    void context.resume();
+  }
+
+  private attachAudioAnalysis(stream: MediaStream): void {
+    this.prepareAudioAnalysis();
+    if (!this.analysisContext || !this.analysisAnalyser) return;
+    this.analysisSource?.disconnect();
+    const source = this.analysisContext.createMediaStreamSource(stream);
+    source.connect(this.analysisAnalyser);
+    this.analysisSource = source;
+  }
+
   private async sendUpload(operation: UploadOperation): Promise<RemoteUploadResponse> {
     if (!this.isUploader) throw new Error("Upload mode is not authenticated");
     return (await this.sendRequest("zuradio.upload", { operation }, 45_000)) as RemoteUploadResponse;
   }
 
   private sendRequest(type: string, payload: Record<string, unknown>, timeout = 10_000): Promise<unknown> {
-    if (!this.control || !this.ready) return Promise.reject(new Error("Remote data channel is not ready"));
+    if (!this.control || !this.controlPeerUuid || !this.ready) {
+      return Promise.reject(new Error("Remote data channel is not ready"));
+    }
+    const control = this.control;
+    const controlPeerUuid = this.controlPeerUuid;
     const sequence = this.sequence;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -559,7 +800,10 @@ export class CompanionBridge {
         reject(new Error("The laptop did not acknowledge the request"));
       }, timeout);
       this.pendingRequests.set(sequence, { resolve, reject, timer });
-      const sent = this.control?.sendData({ type, peerId: this.peerId, sequence, ...payload });
+      const sent = control.sendData(
+        { type, peerId: this.peerId, sequence, ...payload },
+        { uuid: controlPeerUuid, allowFallback: false },
+      );
       if (!sent) {
         clearTimeout(timer);
         this.pendingRequests.delete(sequence);
@@ -686,6 +930,39 @@ function isAudioRoute(value: unknown): value is AudioRoute {
   if (!value || typeof value !== "object") return false;
   const route = value as AudioRoute;
   return [route.room, route.stream, route.transportKey].every((field) => typeof field === "string" && field.length > 0);
+}
+
+function beaconInvitation(
+  message: MessageRecord,
+  mode: RemoteMode,
+): CompanionInvitation {
+  const epoch = numberField(message, "epoch");
+  const passwordIterations = numberField(message, "passwordIterations");
+  if (passwordIterations !== 210_000) throw new Error("Unsupported password protocol");
+  return {
+    version: "2",
+    mode,
+    session: stringField(message, "session", 64),
+    epoch,
+    controllerRoom: stringField(message, "controllerRoom", 128),
+    controllerStream: stringField(message, "controllerStream", 128),
+    controllerTransportKey: stringField(message, "controllerTransportKey", 128),
+    passwordSalt: stringField(message, "passwordSalt", 128),
+    passwordIterations,
+  };
+}
+
+function projectSpectrum(source: Uint8Array, target: Uint8Array): void {
+  const usable = Math.min(source.length, 104);
+  for (let index = 0; index < target.length; index += 1) {
+    const start = Math.floor((index / target.length) ** 1.7 * usable);
+    const end = Math.max(start + 1, Math.floor(((index + 1) / target.length) ** 1.7 * usable));
+    let peak = 0;
+    for (let sourceIndex = start; sourceIndex < Math.min(end, usable); sourceIndex += 1) {
+      peak = Math.max(peak, source[sourceIndex] ?? 0);
+    }
+    target[index] = peak;
+  }
 }
 
 function isUploadResponse(value: unknown): value is RemoteUploadResponse {

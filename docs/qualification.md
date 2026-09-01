@@ -72,7 +72,7 @@ create/list/add/move/remove/rename/delete. Final canonical state was checked wit
 
 - Node.js 22.23.2 / npm 10.9.8.
 - TypeScript `tsc --noEmit`: passed.
-- Vitest 3.2.7 invitation/parser and browser format suites: 5 passed, 0 failed.
+- Vitest 3.2.7 rendezvous parity and browser format suites: 4 passed, 0 failed.
 - Vite 7.3.6 production host build: passed.
 - `npm audit`: 0 vulnerabilities after upgrading Vite, Vitest, and Playwright.
 - `npm audit --omit=dev`: 0 production vulnerabilities.
@@ -85,19 +85,20 @@ matrix passed first against the development release build and then again against
 the binary and web files installed under `~/.local` using an isolated database:
 
 1. Real VDO.Ninja broadcast with separate host, listener, and controller browser
-   contexts, an attached live audio `MediaStreamTrack`, fragment erasure,
-   sanitized listener now-playing data, and controller authentication.
+   contexts, password-only rendezvous, an attached live audio
+   `MediaStreamTrack`, sanitized listener now-playing data, and controller
+   authentication.
 2. Scan, search, album, artist, group-to-library navigation, and library browsing.
-3. Playlist create, select, populate, reorder, remove, rename, and delete.
+3. Phone-width playlist-library create, select, populate through the dedicated
+   track picker, reorder, remove, rename, save, reopen, and delete.
 4. Play, pause, resume, stop, next, previous, seek, volume, mute, favorite,
    history, shuffle, order restoration, and repeat modes.
 5. Queue add, move, remove, and clear.
-6. Separate listen/control/upload invitation creation, clipboard copy, and Stop
-   revocation.
+6. URL-free Listen/Control/Upload buttons, password dialogs, private-route
+   handoff, and Stop revocation.
 7. Keyboard reachability and 390 × 844 responsive layout.
 8. Loopback health and unauthenticated snapshot rejection.
-9. Safe no-invitation/offline landing behavior and editable malformed-link
-   validation.
+9. Safe offline landing behavior with no URL field or page-load connection.
 10. Forged-proof rejection, mode-transcript mismatch, listener/uploader
     escalation denial, actor overwrite, valid controller acceptance, peer
     binding, replay rejection, and grant revocation.
@@ -163,8 +164,8 @@ Zuradio and Deploy Zuradio Web Companion GitHub Actions workflows.
 - A data-channel-open event could precede actual writability, causing Zuradio to
   discard the one password hello and time out. The proof key is now retained
   until a successful send and the hello is retried after the data-only view opens.
-- A malformed pasted invitation was erased during validation; it now remains
-  editable while the error is shown.
+- Invitation URLs and malformed-URL states were removed; three explicit mode
+  buttons now open an accessible password dialog and discover the laptop.
 - Local user actions could race a short track's automatic `next`, causing stale
   revisions; host mutations are now serialized.
 - Clap interpreted positional boolean values as presence flags, preventing CLI

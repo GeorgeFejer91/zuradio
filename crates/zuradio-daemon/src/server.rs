@@ -44,6 +44,7 @@ use crate::upload::{UploadError, UploadManager, UploadOperation, UploadOutcome};
 const MAX_BODY_BYTES: usize = 32 * 1024;
 const GRANT_TTL: Duration = Duration::from_hours(8);
 const PASSWORD_ITERATIONS: u32 = 210_000;
+const RENDEZVOUS_SALT: &[u8] = b"zuradio-rendezvous-v1|georgefejer91-zuradio";
 
 #[derive(Debug)]
 pub struct ServeOptions {
@@ -63,7 +64,6 @@ struct AppState {
     cli_token: Arc<str>,
     session_token: Arc<str>,
     music_roots: Arc<Vec<PathBuf>>,
-    companion_url: Arc<str>,
     broadcast: Arc<Mutex<Option<BroadcastSession>>>,
     grants: Arc<Mutex<HashMap<String, Grant>>>,
     remote_password: Option<Arc<str>>,
@@ -79,6 +79,9 @@ struct BroadcastSession {
     listen_room: String,
     listen_stream: String,
     listen_transport_key: String,
+    rendezvous_room: String,
+    rendezvous_stream: String,
+    rendezvous_transport_key: String,
     controller_room: String,
     controller_stream: String,
     controller_transport_key: String,
@@ -86,9 +89,6 @@ struct BroadcastSession {
     password_iterations: u32,
     #[serde(skip)]
     password_key: [u8; 32],
-    listener_invitation: String,
-    controller_invitation: String,
-    upload_invitation: String,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -249,7 +249,6 @@ where
         cli_token: Arc::from(cli_token.clone()),
         session_token: Arc::from(session_token),
         music_roots: Arc::new(music_roots),
-        companion_url: Arc::from(options.companion_url),
         broadcast: Arc::new(Mutex::new(None)),
         grants: Arc::new(Mutex::new(HashMap::new())),
         remote_password: remote_password.map(Arc::from),
@@ -576,6 +575,11 @@ async fn start_broadcast(
     let listen_room = random_id();
     let listen_stream = random_id();
     let listen_transport_key = random_secret();
+    let mut rendezvous_key = derive_password_key(password.as_bytes(), RENDEZVOUS_SALT)?;
+    let rendezvous_room = rendezvous_component(&rendezvous_key, b"room")?;
+    let rendezvous_stream = rendezvous_component(&rendezvous_key, b"stream")?;
+    let rendezvous_transport_key = rendezvous_component(&rendezvous_key, b"transport")?;
+    rendezvous_key.fill(0);
     let controller_room = random_id();
     let controller_stream = random_id();
     let controller_transport_key = random_secret();
@@ -583,31 +587,21 @@ async fn start_broadcast(
     let password_salt = URL_SAFE_NO_PAD.encode(password_salt_bytes);
     let password_iterations = PASSWORD_ITERATIONS;
     let password_key = derive_password_key(password.as_bytes(), &password_salt_bytes)?;
-    let base = state.companion_url.trim_end_matches('/');
-    let listener_invitation = format!(
-        "{base}/companion/#v=2&mode=listen&session={session_id}&epoch={epoch}&room={controller_room}&stream={controller_stream}&transportKey={controller_transport_key}&passwordSalt={password_salt}&passwordIterations={password_iterations}"
-    );
-    let controller_invitation = format!(
-        "{base}/companion/#v=2&mode=control&session={session_id}&epoch={epoch}&room={controller_room}&stream={controller_stream}&transportKey={controller_transport_key}&passwordSalt={password_salt}&passwordIterations={password_iterations}"
-    );
-    let upload_invitation = format!(
-        "{base}/companion/#v=2&mode=upload&session={session_id}&epoch={epoch}&room={controller_room}&stream={controller_stream}&transportKey={controller_transport_key}&passwordSalt={password_salt}&passwordIterations={password_iterations}"
-    );
     let session = BroadcastSession {
         session_id,
         epoch,
         listen_room,
         listen_stream,
         listen_transport_key,
+        rendezvous_room,
+        rendezvous_stream,
+        rendezvous_transport_key,
         controller_room,
         controller_stream,
         controller_transport_key,
         password_salt,
         password_iterations,
         password_key,
-        listener_invitation,
-        controller_invitation,
-        upload_invitation,
     };
     *lock(&state.broadcast)? = Some(session.clone());
     lock(&state.grants)?.clear();
@@ -1067,6 +1061,10 @@ fn derive_password_key(password: &[u8], salt: &[u8]) -> ApiResult<[u8; 32]> {
     Ok(key)
 }
 
+fn rendezvous_component(key: &[u8; 32], label: &[u8]) -> ApiResult<String> {
+    Ok(URL_SAFE_NO_PAD.encode(hmac_bytes(key, label)?))
+}
+
 fn read_remote_password(path: &Path) -> anyhow::Result<String> {
     let bytes = fs::read(path).with_context(|| "reading remote password file")?;
     #[cfg(unix)]
@@ -1163,5 +1161,24 @@ mod tests {
             let epoch = random_epoch();
             assert!((1..=JAVASCRIPT_MAX_SAFE_INTEGER).contains(&epoch));
         }
+    }
+
+    #[test]
+    fn password_rendezvous_is_deterministic_and_domain_separated() -> Result<(), String> {
+        let key = derive_password_key(b"a-long-test-password", RENDEZVOUS_SALT)
+            .map_err(|_| "key derivation failed")?;
+        let room = rendezvous_component(&key, b"room").map_err(|_| "room failed")?;
+        let stream = rendezvous_component(&key, b"stream").map_err(|_| "stream failed")?;
+        let transport = rendezvous_component(&key, b"transport").map_err(|_| "transport failed")?;
+        assert_eq!(room, "5UFNZ02OXYjjziKttJgsh8cUfLnvc6VxwLbKvbl36s4");
+        assert_eq!(stream, "5RQiiZWIVPGFyJG29PIHWPZQZUjVXv8RPLdOkrQTOo8");
+        assert_eq!(transport, "NyPZYj4WqcG63U708i6bw35Mclif3LIJ7kHVw75EUEw");
+        assert_ne!(room, stream);
+        assert_ne!(stream, transport);
+        assert_eq!(
+            room,
+            rendezvous_component(&key, b"room").map_err(|_| "room failed")?
+        );
+        Ok(())
     }
 }

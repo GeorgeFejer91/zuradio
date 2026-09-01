@@ -25,8 +25,8 @@ the stream unavailable.
 - A loopback-only local web player, installed as a hardened systemd user
   service on Linux, plus a Tauri v2 desktop shell with no WebView IPC
   permissions and the bundle identifier `com.georgefejer.zuradio`.
-- Explicit Start/Stop Broadcast controls and separate password-gated listen,
-  control, and upload invitations.
+- Explicit Start/Stop Broadcast controls and password-discovered, separately
+  scoped Listen, Control, and Upload modes with no invitation URLs.
 - A read-only listener UI, a controller UI with player, queue, favorite, and
   playlist controls, and a folder/file upload UI that writes directly to this
   laptop rather than GitHub Pages.
@@ -85,7 +85,7 @@ Linux, Zuradio discovers either `~/Desktop/zuradio.txt` or
 `~/Schreibtisch/zuradio.txt`; the file must contain 8–256 bytes and must not be
 readable by group or other users (`chmod 600`). It can also be selected with
 `--remote-password-file` or `ZURADIO_REMOTE_PASSWORD_FILE`. The password is
-never placed in an invitation, database, GitHub Pages artifact, or log.
+never placed in a URL, database, GitHub Pages artifact, or log.
 
 ## Add music and use the CLI
 
@@ -123,8 +123,8 @@ CLI commands control canonical Rust state. Audio output is produced by the open
 host UI, so the browser must be open and must have received a playback gesture
 before browser autoplay policy allows unattended CLI playback.
 
-Authorized upload invitations accept individual files or a browser-selected
-folder. Files are transferred sequentially over the encrypted live data bridge,
+Authorized Upload mode accepts individual files or a browser-selected folder.
+Files are transferred sequentially over the encrypted live data bridge,
 checked with SHA-256, staged until the whole batch validates, and then moved to
 `~/.local/share/zuradio/library/`. Upload limits are 512 files, 512 MiB per file,
 and 16 GiB per batch. See [the upload protocol](docs/upload-protocol.md).
@@ -134,18 +134,21 @@ and 16 GiB per batch. See [the upload protocol](docs/upload-protocol.md).
 1. Open Zuradio on the laptop and select a track.
 2. Open **Broadcast** and choose **Start broadcast**. This explicit local gesture
    unlocks audio capture and creates fresh credentials.
-3. Send the listen invitation to someone who may hear the live stream and see
-   sanitized now-playing data. They must enter the Zuradio password.
-4. Use the control invitation for player, queue, favorite, and playlist access,
-   or the upload invitation for adding files/folders to the managed repository.
-   The same password unlocks each link, but Rust grants only that link's mode.
-5. Choose **Stop broadcast** to close peers, discard partial uploads, and revoke the complete broadcast
-   epoch. Old links cannot rejoin a later session.
+3. Open the Zuradio Web Companion on a phone and tap **Listen**, **Control**, or
+   **Upload**. The site prompts for the shared password; no URL needs to be
+   copied or pasted.
+4. Listen receives live audio and sanitized now-playing data. Control adds the
+   player, queue, library, favorites, and a persistent playlist library. Upload
+   accepts files or folders for the managed laptop repository. Rust grants only
+   the selected mode after mutual proof.
+5. Choose **Stop broadcast** to close peers, discard partial uploads, and revoke
+   the complete broadcast epoch.
 
-Invitation credentials live after `#` in the URL, so they are not sent in the
-HTTP request to GitHub Pages. The companion removes the fragment immediately
-and keeps it only in memory. It registers no service worker and has no catalog
-or media endpoint.
+The password derives only a deterministic, data-only rendezvous route. The
+laptop returns fresh private session coordinates over the exact requester-bound
+WebRTC channel, then Rust requires a separate PBKDF2/HMAC proof before exposing
+state, audio, uploads, or control. The companion registers no service worker and
+has no catalog or media endpoint.
 
 ## Development and qualification
 

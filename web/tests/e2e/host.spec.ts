@@ -197,24 +197,18 @@ test("moves and clears the queue", async ({ page }) => {
   await expect(page.locator(".right-panel .queue-item")).toHaveCount(0);
 });
 
-test("creates role-separated broadcast invitations and revokes them", async ({ page }) => {
+test("starts password discovery without exposing invitation URLs and revokes it", async ({ page }) => {
   test.setTimeout(60_000);
+  await page.evaluate(() => fetch("/api/v1/broadcast/stop", { method: "POST" }));
+  await page.reload();
   await page.getByRole("button", { name: /Broadcast/ }).click();
   await page.getByTestId("start-broadcast").click();
   await expect(page.getByTestId("stop-broadcast")).toBeVisible({ timeout: 35_000 });
-  const listener = await page.getByTestId("listener-invitation").inputValue();
-  const controller = await page.getByTestId("controller-invitation").inputValue();
-  const upload = await page.getByTestId("upload-invitation").inputValue();
-  expect(listener).toContain("#v=2&mode=listen");
-  expect(listener).not.toContain("pairingKey=");
-  expect(listener).not.toContain("listenTransportKey=");
-  expect(controller).toContain("#v=2&mode=control");
-  expect(controller).not.toContain("pairingKey=");
-  expect(upload).toContain("#v=2&mode=upload");
-  expect(new URL(listener).search).toBe("");
-  await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: runtime.baseUrl });
-  await page.getByTestId("listener-invitation").locator("..").getByRole("button", { name: "Copy" }).click();
-  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(listener);
+  await expect(page.getByTestId("access-modes")).toContainText("Listen");
+  await expect(page.getByTestId("access-modes")).toContainText("Control");
+  await expect(page.getByTestId("access-modes")).toContainText("Upload");
+  await expect(page.getByRole("textbox")).toHaveCount(0);
+  await expect(page.getByText(/invitation/i)).toHaveCount(0);
   await page.getByTestId("stop-broadcast").click();
   await expect(page.getByTestId("start-broadcast")).toBeVisible();
 });

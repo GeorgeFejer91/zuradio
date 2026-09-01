@@ -13,9 +13,10 @@ const passwordPath = process.env.ZURADIO_TEST_PASSWORD_FILE;
 if (!passwordPath) throw new Error("ZURADIO_TEST_PASSWORD_FILE must name the daemon password file");
 const password = fs.readFileSync(passwordPath, "utf8").replace(/[\r\n]+$/, "");
 const initialTrackCount = process.env.ZURADIO_FORMAT_FIXTURES === "1" ? 8 : 3;
+const companionBase = process.env.ZURADIO_COMPANION_BASE ?? "http://127.0.0.1:4173";
 
 test("streams from the laptop while enforcing listener and controller roles", async ({ browser }) => {
-  test.setTimeout(120_000);
+  test.setTimeout(180_000);
   const errors: string[] = [];
   const hostContext = await browser.newContext();
   const host = await hostContext.newPage();
@@ -35,21 +36,19 @@ test("streams from the laptop while enforcing listener and controller roles", as
     await host.getByRole("button", { name: /Broadcast/ }).click();
     await host.getByTestId("start-broadcast").click();
     await expect(host.getByTestId("stop-broadcast")).toBeVisible({ timeout: 35_000 });
-    const listenerInvitation = await host.getByTestId("listener-invitation").inputValue();
-    const controllerInvitation = await host.getByTestId("controller-invitation").inputValue();
-
     const listenerContext = await browser.newContext();
     const listener = await listenerContext.newPage();
     watch(listener, "listener", errors);
-    await listener.goto(listenerInvitation);
-    await expect.poll(() => new URL(listener.url()).hash).toBe("");
-    await expect(listener.getByText("Listen", { exact: true })).toBeVisible();
-    await expect(listener.getByText(/Listen access is read-only/)).toBeVisible();
+    await listener.goto(companionBase);
+    await listener.setViewportSize({ width: 390, height: 844 });
+    await listener.getByTestId("connect-listen").click();
     await expect(listener.getByLabel("Remote player controls")).toHaveCount(0);
     await expect(listener.getByRole("navigation", { name: "Controller sections" })).toHaveCount(0);
     await listener.getByTestId("password").fill(password);
     await listener.getByTestId("connect").click();
     await expect(listener.getByText("Listening live", { exact: true })).toBeVisible({ timeout: 45_000 });
+    await expect(listener.getByText(/Listen access is read-only/)).toBeVisible();
+    await expect(listener.getByTestId("companion-visualizer")).toBeVisible();
     await expect(listener.getByTestId("companion-title")).toHaveText(firstTitle, { timeout: 20_000 });
     await listener.waitForFunction(() => {
       const audio = document.querySelector<HTMLAudioElement>('audio[aria-label="Live Zuradio audio"]');
@@ -59,12 +58,13 @@ test("streams from the laptop while enforcing listener and controller roles", as
     const controllerContext = await browser.newContext();
     const controller = await controllerContext.newPage();
     watch(controller, "controller", errors);
-    await controller.goto(controllerInvitation);
-    await expect.poll(() => new URL(controller.url()).hash).toBe("");
-    await expect(controller.getByText("Control", { exact: true })).toBeVisible();
+    await controller.goto(companionBase);
+    await controller.setViewportSize({ width: 390, height: 844 });
+    await controller.getByTestId("connect-control").click();
     await controller.getByTestId("password").fill(password);
     await controller.getByTestId("connect").click();
     await expect(controller.getByText("Controller connected", { exact: true })).toBeVisible({ timeout: 45_000 });
+    await expect(controller.getByTestId("companion-visualizer")).toBeVisible();
     await expect(controller.locator(".controller-panel .track-row")).toHaveCount(initialTrackCount);
     const remotePlayPause = controller.getByTestId("remote-play-pause");
     if ((await remotePlayPause.textContent()) === "Play") {
@@ -165,37 +165,39 @@ test("streams from the laptop while enforcing listener and controller roles", as
     await controller.getByRole("button", { name: "Playlists", exact: true }).click();
     await controller.getByRole("textbox", { name: "New playlist name" }).fill(playlistName);
     await controller.getByRole("button", { name: "Create", exact: true }).click();
-    await expect(controller.locator("button.select-playlist").filter({ hasText: playlistName })).toBeVisible();
-    await controller.getByRole("button", { name: "Library", exact: true }).click();
-    await controller.locator(".controller-panel .track-row").nth(0).getByRole("button", { name: `Add to ${playlistName}` }).click();
-    await controller.locator(".controller-panel .track-row").nth(1).getByRole("button", { name: `Add to ${playlistName}` }).click();
-    await controller.getByRole("button", { name: "Playlists", exact: true }).click();
-    const playlistItems = controller.locator(".controller-panel .playlist-layout .queue-item");
+    await expect(controller.locator(".playlist-card").filter({ hasText: playlistName })).toBeVisible();
+    await controller.getByRole("button", { name: "Add tracks", exact: true }).click();
+    const pickerRows = controller.locator(".playlist-track-picker li");
+    await pickerRows.nth(0).getByRole("button", { name: "Add", exact: true }).click();
+    await pickerRows.nth(1).getByRole("button", { name: "Add", exact: true }).click();
+    const closePicker = controller.getByRole("button", { name: "Close track picker", exact: true });
+    const touchTarget = await closePicker.boundingBox();
+    expect(touchTarget?.height ?? 0).toBeGreaterThanOrEqual(44);
+    await closePicker.click();
+    const playlistItems = controller.locator(".playlist-tracks li");
     await expect(playlistItems).toHaveCount(2);
     await playlistItems.nth(1).getByRole("button", { name: / up$/ }).click();
     await playlistItems.nth(0).getByRole("button", { name: /Remove .* from playlist/ }).click();
     await expect(playlistItems).toHaveCount(1);
-    controller.once("dialog", (dialog) => dialog.accept(renamedPlaylist));
-    await controller.getByRole("button", { name: `Rename ${playlistName}` }).click();
-    await expect(controller.locator("button.select-playlist").filter({ hasText: renamedPlaylist })).toBeVisible();
+    await controller.getByRole("button", { name: "Rename", exact: true }).click();
+    await controller.locator("[data-rename-playlist]").fill(renamedPlaylist);
+    await controller.getByRole("button", { name: "Save name", exact: true }).click();
+    await expect(controller.locator(".playlist-card").filter({ hasText: renamedPlaylist })).toBeVisible();
     controller.once("dialog", (dialog) => dialog.accept());
-    await controller.getByRole("button", { name: `Delete ${renamedPlaylist}` }).click();
-    await expect(controller.locator("button.select-playlist").filter({ hasText: renamedPlaylist })).toHaveCount(0);
+    await controller.getByRole("button", { name: "Delete", exact: true }).click();
+    await expect(controller.locator(".playlist-card").filter({ hasText: renamedPlaylist })).toHaveCount(0);
 
-    await controller.setViewportSize({ width: 390, height: 844 });
     await controller.screenshot({ path: "test-results/mobile-controller.png", fullPage: true });
-    await listener.setViewportSize({ width: 390, height: 844 });
     await listener.screenshot({ path: "test-results/mobile-listener.png", fullPage: true });
 
     await controller.getByRole("button", { name: "Disconnect", exact: true }).click();
     await listener.getByRole("button", { name: "Disconnect", exact: true }).click();
-    await expect(controller.getByTestId("connect")).toBeVisible();
-    await expect(listener.getByTestId("connect")).toBeVisible();
+    await expect(controller.getByTestId("connect-control")).toBeVisible();
+    await expect(listener.getByTestId("connect-listen")).toBeVisible();
     expect(errors, "browser page and console errors").toEqual([]);
   } finally {
-    if (await host.getByTestId("stop-broadcast").isVisible().catch(() => false)) {
-      await host.getByTestId("stop-broadcast").click().catch(() => undefined);
-    }
+    await host.evaluate(() => fetch("/api/v1/broadcast/stop", { method: "POST" })).catch(() => undefined);
+    await host.close().catch(() => undefined);
   }
 });
 

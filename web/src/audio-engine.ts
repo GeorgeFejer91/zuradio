@@ -4,6 +4,8 @@ export class AudioEngine {
   readonly element: HTMLAudioElement;
   private context: AudioContext | null = null;
   private gain: GainNode | null = null;
+  private analyser: AnalyserNode | null = null;
+  private analyserData: Uint8Array<ArrayBuffer> | null = null;
   private broadcastDestination: MediaStreamAudioDestinationNode | null = null;
   private loadedTrackId: string | null = null;
   private gestureUnlocked = false;
@@ -33,6 +35,13 @@ export class AudioEngine {
     this.ensureGraph();
     if (!this.broadcastDestination) throw new Error("Audio broadcast output is unavailable");
     return this.broadcastDestination.stream;
+  }
+
+  readSpectrum(target: Uint8Array): boolean {
+    if (!this.analyser || !this.analyserData || this.element.paused) return false;
+    this.analyser.getByteFrequencyData(this.analyserData);
+    projectSpectrum(this.analyserData, target);
+    return true;
   }
 
   async sync(snapshot: AppSnapshot): Promise<void> {
@@ -82,6 +91,8 @@ export class AudioEngine {
     void this.context?.close();
     this.context = null;
     this.gain = null;
+    this.analyser = null;
+    this.analyserData = null;
     this.broadcastDestination = null;
   }
 
@@ -90,12 +101,18 @@ export class AudioEngine {
     const context = new AudioContext({ latencyHint: "playback" });
     const source = context.createMediaElementSource(this.element);
     const gain = context.createGain();
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 256;
+    analyser.smoothingTimeConstant = 0.74;
     const destination = context.createMediaStreamDestination();
     source.connect(gain);
-    gain.connect(context.destination);
+    gain.connect(analyser);
+    analyser.connect(context.destination);
     gain.connect(destination);
     this.context = context;
     this.gain = gain;
+    this.analyser = analyser;
+    this.analyserData = new Uint8Array(analyser.frequencyBinCount);
     this.broadcastDestination = destination;
   }
 
@@ -103,5 +120,18 @@ export class AudioEngine {
     if (!this.gain) return;
     const value = state.muted ? 0 : state.volume / 100;
     this.gain.gain.setTargetAtTime(value, this.context?.currentTime ?? 0, 0.01);
+  }
+}
+
+function projectSpectrum(source: Uint8Array, target: Uint8Array): void {
+  const usable = Math.min(source.length, 104);
+  for (let index = 0; index < target.length; index += 1) {
+    const start = Math.floor((index / target.length) ** 1.7 * usable);
+    const end = Math.max(start + 1, Math.floor(((index + 1) / target.length) ** 1.7 * usable));
+    let peak = 0;
+    for (let sourceIndex = start; sourceIndex < Math.min(end, usable); sourceIndex += 1) {
+      peak = Math.max(peak, source[sourceIndex] ?? 0);
+    }
+    target[index] = peak;
   }
 }
