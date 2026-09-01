@@ -1,4 +1,7 @@
+import { execFile } from "node:child_process";
 import fs from "node:fs";
+import { promisify } from "node:util";
+import { fileURLToPath } from "node:url";
 
 import { expect, test, type Browser, type Page } from "@playwright/test";
 
@@ -16,6 +19,10 @@ const fixture = process.env.ZURADIO_UPLOAD_FIXTURE;
 const fixtureFolder = process.env.ZURADIO_UPLOAD_FOLDER;
 const expectedTitle = process.env.ZURADIO_UPLOAD_EXPECTED_TITLE ?? "Zuradio Upload Fixture";
 const companionBase = process.env.ZURADIO_COMPANION_BASE ?? "http://127.0.0.1:4173";
+const uploadCli = fileURLToPath(new URL("../../scripts/upload-cli.mjs", import.meta.url));
+const execFileAsync = promisify(execFile);
+const WINDOWS_CHROME_USER_AGENT =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/140.0.0.0 Safari/537.36";
 
 test("rejects a wrong password before exposing live audio", async ({ browser }) => {
   test.setTimeout(70_000);
@@ -46,6 +53,7 @@ test("switches from control to upload and exposes the catalogued result", async 
     await startFreshBroadcast(host);
     const uploader = await browser.newPage();
     await uploader.goto(companionBase);
+    await uploader.setViewportSize({ width: 390, height: 844 });
     await uploader.getByTestId("connect-control").click();
     await uploader.getByTestId("password").fill(password);
     await uploader.getByTestId("connect").click();
@@ -55,6 +63,7 @@ test("switches from control to upload and exposes the catalogued result", async 
     await expect(uploader.getByRole("dialog")).toHaveCount(0);
     await uploader.locator("[data-upload-files]").setInputFiles(fixture as string);
     await expect(uploader.getByText("1 file selected", { exact: true })).toBeVisible();
+    await uploader.screenshot({ path: "test-results/mobile-upload-file-selection.png", fullPage: true });
     const startedAt = Date.now();
     await uploader.getByTestId("upload").click();
     await expect(uploader.getByText(expectedTitle, { exact: true })).toBeVisible({ timeout: 90_000 });
@@ -76,6 +85,88 @@ test("switches from control to upload and exposes the catalogued result", async 
   }
 });
 
+test("uploads from a Windows Chromium profile while ignoring a competing stale host", async ({ browser }) => {
+  test.skip(!fixture || !fs.existsSync(fixture), "Set ZURADIO_UPLOAD_FIXTURE to a valid audio file");
+  test.setTimeout(180_000);
+  const staleHost = await authenticatedHost(browser);
+  let currentHost: Page | null = null;
+  const windowsContext = await browser.newContext({
+    userAgent: WINDOWS_CHROME_USER_AGENT,
+    viewport: { width: 1366, height: 768 },
+  });
+  try {
+    await startFreshBroadcast(staleHost);
+    await staleHost.waitForTimeout(750);
+
+    currentHost = await authenticatedHost(browser);
+    await currentHost.getByRole("button", { name: /Broadcast/ }).click();
+    await currentHost.getByTestId("stop-broadcast").click();
+    await expect(currentHost.getByTestId("start-broadcast")).toBeVisible();
+    await currentHost.getByTestId("start-broadcast").click();
+    await expect(currentHost.getByTestId("stop-broadcast")).toBeVisible({ timeout: 35_000 });
+    await expect(staleHost.getByText("A newer Zuradio window replaced this broadcast", { exact: true })).toBeVisible({
+      timeout: 5_000,
+    });
+
+    const uploader = await windowsContext.newPage();
+    await uploader.goto(companionBase);
+    expect(await uploader.evaluate(() => navigator.userAgent)).toContain("Windows NT 10.0");
+    await uploader.getByTestId("connect-upload").click();
+    await uploader.getByTestId("password").fill(password);
+    const connectedAt = Date.now();
+    await uploader.getByTestId("connect").click();
+    await expect(uploader.getByText("Upload connected", { exact: true })).toBeVisible({ timeout: 60_000 });
+    expect(Date.now() - connectedAt, "Windows upload connection latency with a stale host").toBeLessThan(30_000);
+    await expect(uploader.getByRole("alert")).toHaveCount(0);
+    await uploader.locator("[data-upload-files]").setInputFiles(fixture as string);
+    await expect(uploader.getByTestId("upload-selection")).toHaveText("1 file selected");
+    await uploader.getByTestId("upload").click();
+    await expect(uploader.getByText(expectedTitle, { exact: true })).toBeVisible({ timeout: 90_000 });
+    await expect(uploader.getByTestId("upload-progress")).toContainText("1 track added to the laptop library");
+  } finally {
+    await windowsContext.close().catch(() => undefined);
+    if (currentHost) await stopBroadcast(currentHost);
+    await staleHost.close().catch(() => undefined);
+  }
+});
+
+test("uploads an individual file through the external browser CLI", async ({ browser }) => {
+  test.skip(!fixture || !fs.existsSync(fixture), "Set ZURADIO_UPLOAD_FIXTURE to a valid audio file");
+  test.setTimeout(240_000);
+  const host = await authenticatedHost(browser);
+  try {
+    await startFreshBroadcast(host);
+    const { stdout, stderr } = await execFileAsync(
+      process.execPath,
+      [
+        uploadCli,
+        "--url",
+        companionBase,
+        "--password-file",
+        passwordPath,
+        "--file",
+        fixture as string,
+      ],
+      { timeout: 210_000, maxBuffer: 1024 * 1024 },
+    );
+    expect(stderr).not.toContain("Zuradio upload failed");
+    const result = JSON.parse(stdout) as {
+      status: string;
+      source: string;
+      selectedFiles: number;
+      importedTracks: number;
+    };
+    expect(result).toMatchObject({
+      status: "uploaded",
+      source: "files",
+      selectedFiles: 1,
+      importedTracks: 1,
+    });
+  } finally {
+    await stopBroadcast(host);
+  }
+});
+
 test("selects a folder, ignores non-audio files, and imports every track", async ({ browser }) => {
   test.skip(!fixtureFolder || !fs.existsSync(fixtureFolder), "Set ZURADIO_UPLOAD_FOLDER to an audio folder");
   test.setTimeout(240_000);
@@ -84,12 +175,14 @@ test("selects a folder, ignores non-audio files, and imports every track", async
     await startFreshBroadcast(host);
     const uploader = await browser.newPage();
     await uploader.goto(companionBase);
+    await uploader.setViewportSize({ width: 390, height: 844 });
     await uploader.getByTestId("connect-upload").click();
     await uploader.getByTestId("password").fill(password);
     await uploader.getByTestId("connect").click();
     await expect(uploader.getByText("Upload connected", { exact: true })).toBeVisible({ timeout: 45_000 });
     await uploader.locator("[data-upload-folder]").setInputFiles(fixtureFolder as string);
     await expect(uploader.getByText("3 files selected", { exact: true })).toBeVisible();
+    await uploader.screenshot({ path: "test-results/mobile-upload-folder-selection.png", fullPage: true });
     await uploader.getByTestId("upload").click();
     await expect(uploader.getByText(/3 tracks added to the laptop library/)).toBeVisible({ timeout: 180_000 });
     await expect(uploader.locator(".imported-list li")).toHaveCount(3);

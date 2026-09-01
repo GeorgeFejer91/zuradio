@@ -54,7 +54,7 @@ The installer performs locked web installation, TypeScript and unit checks, a
 production web build, Rust tests, and an optimized Rust build before replacing
 the installed files. It then installs:
 
-- `~/.local/bin/zuradio` and `~/.local/bin/zuradio-launch`;
+- `~/.local/bin/zuradio`, `zuradio-launch`, and `zuradio-desktop-launch`;
 - `~/.local/lib/zuradio/` for the daemon and local UI;
 - `~/.config/systemd/user/zuradio.service`;
 - `~/.local/share/applications/zuradio.desktop`; and
@@ -63,7 +63,7 @@ the installed files. It then installs:
 Launch **Zuradio** from the application menu or run:
 
 ```sh
-zuradio-launch
+zuradio-desktop-launch
 ```
 
 The native Tauri release candidate can be installed after building or
@@ -140,6 +140,25 @@ checked with SHA-256, staged until the whole batch validates, and then moved to
 `~/.local/share/zuradio/library/`. Upload limits are 512 files, 512 MiB per file,
 and 16 GiB per batch. See [the upload protocol](docs/upload-protocol.md).
 
+An external program or Codex agent can use the same browser bridge through the
+machine-readable upload command. It accepts repeated individual files or one
+whole folder and never places the password on the command line:
+
+```sh
+cd web
+npm ci
+npx playwright install chromium
+npm run upload -- --password-file "/path/to/zuradio.txt" --file "/path/to/song.flac"
+npm run upload -- --password-file "/path/to/zuradio.txt" --folder "/path/to/music-folder"
+```
+
+The command defaults to the public companion, can target another deployment
+with `--url`, and can use an installed Chrome or Brave binary with
+`--browser-executable`. It prints JSON describing the selected and imported
+tracks, so automation can verify the result. The browser remains only a secure
+transport client; files still travel directly to the active laptop and are
+never stored by GitHub Pages.
+
 ## Broadcast to a phone
 
 1. Open Zuradio on the laptop. The desktop shell rotates any stale session,
@@ -186,11 +205,14 @@ npm run build:pages
 ```
 
 The Playwright suite uses independent browser contexts for the laptop,
-listener, controller, and uploader. It validates a real VDO.Ninja media/data
-path, password proof, uploads, metadata edits, WAV/FLAC decode, all local and
-remote controls, responsive layouts, mode isolation, peer/session binding,
-monotonic replay rejection, Stop-based grant revocation, sub-15-second remote
-connection ceilings, and sub-2-second command acknowledgement. See
+listener, controller, and uploader. Its compatibility gate runs the companion
+through Chromium (Chrome, Brave, Edge, Android), Firefox, and WebKit
+(Safari/iPhone) engines and verifies both a real laptop audio track and
+browser-selected file/folder upload. The wider suite validates the VDO.Ninja
+media/data path, password proof, uploads, metadata edits, WAV/FLAC decode, all
+local and remote controls, responsive layouts, mode isolation, peer/session
+binding, monotonic replay rejection, Stop-based grant revocation, sub-15-second
+remote connection ceilings, and sub-2-second command acknowledgement. See
 [release qualification](docs/qualification.md)
 for the exact evidence and remaining distribution gates.
 
@@ -213,6 +235,8 @@ for the exact evidence and remaining distribution gates.
   performance checks.
 - `web/scripts/verify-installed-public.mjs`: installed desktop to public Pages
   stream/control check with connection and command latency measurements.
+- `web/scripts/upload-cli.mjs`: cross-platform, JSON-emitting remote file or
+  folder uploader for agents and shell automation.
 - `scripts/benchmark-library.sh`: repeatable scan, snapshot, media Range, and
   resident-memory thresholds over a 60-track corpus.
 - `.github/workflows/pages.yml`: companion-only GitHub Pages deployment with a

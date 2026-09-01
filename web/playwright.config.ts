@@ -9,13 +9,31 @@ export default defineConfig({
   retries: 0,
   reporter: [["list"], ["html", { open: "never", outputFolder: "test-results/report" }]],
   use: {
-    launchOptions: {
-      // Tauri/Wry enables media autoplay for the packaged desktop WebView.
-      args: ["--autoplay-policy=no-user-gesture-required"],
-    },
     trace: "retain-on-failure",
     screenshot: "only-on-failure",
     video: "retain-on-failure",
   },
+  projects: [
+    {
+      name: "chromium",
+      use: {
+        browserName: "chromium",
+        launchOptions: {
+          // Tauri/Wry enables media autoplay for the packaged desktop WebView.
+          args: ["--autoplay-policy=no-user-gesture-required"],
+        },
+      },
+    },
+    {
+      name: "firefox-compat",
+      testMatch: /zz-browser-compat\.spec\.ts/,
+      use: { browserName: "firefox" },
+    },
+    {
+      name: "webkit-compat",
+      testMatch: /zz-browser-compat\.spec\.ts/,
+      use: { browserName: "webkit" },
+    },
+  ],
   outputDir: "test-results/artifacts",
 });

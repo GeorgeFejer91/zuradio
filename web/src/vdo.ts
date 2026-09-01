@@ -19,6 +19,9 @@ const MAX_MESSAGE_BYTES = 16_384;
 const UPLOAD_CHUNK_BYTES = 8 * 1024;
 const MAX_UPLOAD_FILES = 512;
 const MAX_UPLOAD_FILE_BYTES = 512 * 1024 * 1024;
+const MAX_RENDEZVOUS_PEERS = 16;
+const MAX_STALE_SESSION_RETRIES = 3;
+const MAX_TRANSIENT_CONNECT_RETRIES = 4;
 const TRUST_STORAGE_KEY = "zuradio.trusted-browser.v1";
 const TRUST_LIFETIME_MS = 24 * 60 * 60 * 1_000;
 
@@ -26,9 +29,11 @@ type MessageRecord = Record<string, unknown> & { type: string };
 
 export interface HostBridgeCallbacks {
   snapshot(): AppSnapshot;
+  broadcast(): Promise<BroadcastSession | null>;
   verify(payload: unknown): Promise<unknown>;
   action(payload: unknown): Promise<unknown>;
   upload(payload: unknown): Promise<unknown>;
+  onSessionReplaced(): void;
   onError(message: string): void;
 }
 
@@ -108,62 +113,67 @@ export class HostBroadcastBridge {
     this.listen = listen;
     this.rendezvous = rendezvous;
     this.control = control;
-    this.attachErrors(listen);
-    this.attachErrors(rendezvous);
-    this.attachErrors(control);
-    listen.addEventListener(
-      "dataChannelOpen",
-      ((event: VDONinjaEvent<"dataChannelOpen">) => {
-        listen.sendData(
-          { type: "zuradio.state", state: nowPlaying(this.callbacks.snapshot()) },
-          { uuid: event.detail.uuid, allowFallback: false },
-        );
-      }) as EventListener,
-    );
-    rendezvous.addEventListener(
-      "dataReceived",
-      ((event: VDONinjaEvent<"dataReceived">) => {
-        this.handleDiscovery(event.detail.uuid, event.detail.data);
-      }) as EventListener,
-    );
-    control.addEventListener(
-      "dataReceived",
-      ((event: VDONinjaEvent<"dataReceived">) => {
-        void this.handleControl(event.detail.uuid, event.detail.data);
-      }) as EventListener,
-    );
-    await Promise.all([listen.connect(), rendezvous.connect(), control.connect()]);
-    await Promise.all([
-      listen.joinRoom({ room: session.listenRoom, password: session.listenTransportKey }),
-      rendezvous.joinRoom({ room: session.rendezvousRoom, password: session.rendezvousTransportKey }),
-      control.joinRoom({ room: session.controllerRoom, password: session.controllerTransportKey }),
-    ]);
-    await Promise.all([
-      control.announce({
-        room: session.controllerRoom,
-        streamID: session.controllerStream,
-        password: session.controllerTransportKey,
-        label: "Zuradio remote bridge",
-      }),
-      rendezvous.announce({
-        room: session.rendezvousRoom,
-        streamID: session.rendezvousStream,
-        password: session.rendezvousTransportKey,
-        label: "Zuradio password rendezvous",
-      }),
-    ]);
-    void listen
-      .publish(stream, {
-        room: session.listenRoom,
-        streamID: session.listenStream,
-        password: session.listenTransportKey,
-        label: "Zuradio live audio",
-        media: { audio: { codec: "opus" } },
-      })
-      .catch((error: unknown) => {
-        this.callbacks.onError(error instanceof Error ? error.message : "Live audio publication failed");
-      });
-    this.publishState(this.callbacks.snapshot());
+    try {
+      this.attachErrors(listen);
+      this.attachErrors(rendezvous);
+      this.attachErrors(control);
+      listen.addEventListener(
+        "dataChannelOpen",
+        ((event: VDONinjaEvent<"dataChannelOpen">) => {
+          listen.sendData(
+            { type: "zuradio.state", state: nowPlaying(this.callbacks.snapshot()) },
+            { uuid: event.detail.uuid, allowFallback: false },
+          );
+        }) as EventListener,
+      );
+      rendezvous.addEventListener(
+        "dataReceived",
+        ((event: VDONinjaEvent<"dataReceived">) => {
+          void this.handleDiscovery(event.detail.uuid, event.detail.data);
+        }) as EventListener,
+      );
+      control.addEventListener(
+        "dataReceived",
+        ((event: VDONinjaEvent<"dataReceived">) => {
+          void this.handleControl(event.detail.uuid, event.detail.data);
+        }) as EventListener,
+      );
+      await Promise.all([listen.connect(), rendezvous.connect(), control.connect()]);
+      await Promise.all([
+        listen.joinRoom({ room: session.listenRoom, password: session.listenTransportKey }),
+        rendezvous.joinRoom({ room: session.rendezvousRoom, password: session.rendezvousTransportKey }),
+        control.joinRoom({ room: session.controllerRoom, password: session.controllerTransportKey }),
+      ]);
+      await Promise.all([
+        control.announce({
+          room: session.controllerRoom,
+          streamID: session.controllerStream,
+          password: session.controllerTransportKey,
+          label: "Zuradio remote bridge",
+        }),
+        rendezvous.announce({
+          room: session.rendezvousRoom,
+          streamID: session.rendezvousStream,
+          password: session.rendezvousTransportKey,
+          label: "Zuradio password rendezvous",
+        }),
+      ]);
+      void listen
+        .publish(stream, {
+          room: session.listenRoom,
+          streamID: session.listenStream,
+          password: session.listenTransportKey,
+          label: "Zuradio live audio",
+          media: { audio: { codec: "opus" } },
+        })
+        .catch((error: unknown) => {
+          this.callbacks.onError(error instanceof Error ? error.message : "Live audio publication failed");
+        });
+      this.publishState(this.callbacks.snapshot());
+    } catch (error) {
+      await this.stop();
+      throw error;
+    }
   }
 
   publishState(snapshot: AppSnapshot): void {
@@ -195,24 +205,38 @@ export class HostBroadcastBridge {
     await Promise.allSettled([listen?.disconnect(), rendezvous?.disconnect(), control?.disconnect()]);
   }
 
-  private handleDiscovery(uuid: string, raw: unknown): void {
+  private async handleDiscovery(uuid: string, raw: unknown): Promise<void> {
     const message = parseMessage(raw);
     if (!message || !this.session || message.type !== "zuradio.discover") return;
+    const session = this.session;
     try {
       const nonce = stringField(message, "nonce", 128);
       const mode = modeField(message, "mode");
+      const current = await this.callbacks.broadcast();
+      if (
+        !current ||
+        current.sessionId !== session.sessionId ||
+        current.epoch !== session.epoch
+      ) {
+        if (this.session === session) {
+          await this.stop();
+          this.callbacks.onSessionReplaced();
+        }
+        return;
+      }
+      if (this.session !== session) return;
       this.rendezvous?.sendData(
         {
           type: "zuradio.beacon",
           nonce,
           mode,
-          session: this.session.sessionId,
-          epoch: this.session.epoch,
-          controllerRoom: this.session.controllerRoom,
-          controllerStream: this.session.controllerStream,
-          controllerTransportKey: this.session.controllerTransportKey,
-          passwordSalt: this.session.passwordSalt,
-          passwordIterations: this.session.passwordIterations,
+          session: session.sessionId,
+          epoch: session.epoch,
+          controllerRoom: session.controllerRoom,
+          controllerStream: session.controllerStream,
+          controllerTransportKey: session.controllerTransportKey,
+          passwordSalt: session.passwordSalt,
+          passwordIterations: session.passwordIterations,
         },
         { uuid, allowFallback: false },
       );
@@ -388,7 +412,7 @@ export class CompanionBridge {
   private beaconWaiter: BeaconWaiter | null = null;
   private discoveryNonce: string | null = null;
   private requestedMode: RemoteMode | null = null;
-  private discoveryPeerUuid: string | null = null;
+  private discoveryPeerUuids = new Set<string>();
   private controlPeerUuid: string | null = null;
   private grantId: string | null = null;
   private analysisContext: AudioContext | null = null;
@@ -433,25 +457,46 @@ export class CompanionBridge {
   async connect(mode: RemoteMode, password: string): Promise<void> {
     const existing = readTrustedDevice();
     const deviceId = existing?.deviceId ?? crypto.randomUUID();
-    return this.connectAttempt(mode, { kind: "password", password, deviceId }, 0);
+    return this.connectWithTransportRecovery(mode, { kind: "password", password, deviceId });
   }
 
   async connectTrusted(mode: RemoteMode): Promise<void> {
     const trusted = readTrustedDevice();
     if (!trusted) throw new Error("Trusted browser access expired");
     try {
-      await this.connectAttempt(mode, { kind: "device", trusted }, 0);
+      await this.connectWithTransportRecovery(mode, { kind: "device", trusted });
     } catch (error) {
       clearTrustedDevice();
       throw error;
     }
   }
 
+  private async connectWithTransportRecovery(mode: RemoteMode, auth: ConnectionAuth): Promise<void> {
+    let lastError: unknown = new Error("Zuradio relay connection failed");
+    for (let attempt = 0; attempt <= MAX_TRANSIENT_CONNECT_RETRIES; attempt += 1) {
+      try {
+        return await this.connectAttempt(mode, auth, 0, new Set());
+      } catch (error) {
+        lastError = error;
+        if (!isTransientTransportFailure(error) || attempt === MAX_TRANSIENT_CONNECT_RETRIES) throw error;
+        await this.disconnect();
+        this.callbacks.onStatus("Connection interrupted; retrying…");
+        await delay(retryDelay(attempt));
+      }
+    }
+    throw lastError;
+  }
+
   forgetTrustedDevice(): void {
     clearTrustedDevice();
   }
 
-  private async connectAttempt(mode: RemoteMode, auth: ConnectionAuth, attempt: number): Promise<void> {
+  private async connectAttempt(
+    mode: RemoteMode,
+    auth: ConnectionAuth,
+    attempt: number,
+    rejectedSessions: Set<string>,
+  ): Promise<void> {
     await this.disconnect();
     this.connectionAuth = auth;
     this.requestedMode = mode;
@@ -465,15 +510,16 @@ export class CompanionBridge {
     rendezvous.addEventListener(
       "dataReceived",
       ((event: VDONinjaEvent<"dataReceived">) => {
-        if (!this.discoveryPeerUuid || event.detail.uuid !== this.discoveryPeerUuid) return;
-        this.handleRendezvousMessage(event.detail.data);
+        if (!this.discoveryPeerUuids.has(event.detail.uuid)) return;
+        this.handleRendezvousMessage(event.detail.data, rejectedSessions);
       }) as EventListener,
     );
     rendezvous.addEventListener(
       "dataChannelOpen",
       ((event: VDONinjaEvent<"dataChannelOpen">) => {
-        this.discoveryPeerUuid ??= event.detail.uuid;
-        if (event.detail.uuid === this.discoveryPeerUuid) this.sendDiscovery();
+        if (this.discoveryPeerUuids.size >= MAX_RENDEZVOUS_PEERS) return;
+        this.discoveryPeerUuids.add(event.detail.uuid);
+        this.sendDiscovery(event.detail.uuid);
       }) as EventListener,
     );
     await rendezvous.connect();
@@ -497,7 +543,7 @@ export class CompanionBridge {
       await this.ensureDiscovery();
       const invitation = await beacon;
       if (this.rendezvous === rendezvous) this.rendezvous = null;
-      this.discoveryPeerUuid = null;
+      this.discoveryPeerUuids.clear();
       void rendezvous.disconnect().catch(() => undefined);
       this.invitation = invitation;
       this.callbacks.onStatus("Authenticating with laptop…");
@@ -552,11 +598,20 @@ export class CompanionBridge {
       }
     } catch (error) {
       const privateRouteWasReached = this.invitation !== null;
+      const rejectedSession = this.invitation?.session ?? null;
+      const reason = error instanceof Error ? error.message : "";
+      const staleSession = reason.includes("session is not authorized");
+      if (staleSession && rejectedSession) rejectedSessions.add(rejectedSession);
       await this.disconnect();
-      if (auth.kind === "password" && privateRouteWasReached && attempt < 1) {
-        this.callbacks.onStatus("Reconnecting to Zuradio laptop…");
-        await delay(600);
-        return this.connectAttempt(mode, auth, attempt + 1);
+      const retryStaleSession = staleSession && attempt < MAX_STALE_SESSION_RETRIES;
+      const retryTransientPasswordRoute =
+        auth.kind === "password" && privateRouteWasReached && !staleSession && attempt < 1;
+      if (retryStaleSession || retryTransientPasswordRoute) {
+        this.callbacks.onStatus(
+          retryStaleSession ? "Ignoring an old broadcast and finding this laptop…" : "Reconnecting to Zuradio laptop…",
+        );
+        await delay(retryStaleSession ? 250 : 600);
+        return this.connectAttempt(mode, auth, attempt + 1, rejectedSessions);
       }
       throw error;
     }
@@ -648,7 +703,7 @@ export class CompanionBridge {
     this.pendingHello = null;
     this.discoveryNonce = null;
     this.requestedMode = null;
-    this.discoveryPeerUuid = null;
+    this.discoveryPeerUuids.clear();
     this.controlPeerUuid = null;
     this.grantId = null;
     this.authKey?.fill(0);
@@ -701,15 +756,21 @@ export class CompanionBridge {
     if (this.beaconWaiter) throw new Error("The Zuradio rendezvous channel is not ready");
   }
 
-  private sendDiscovery(): boolean {
-    if (!this.rendezvous || !this.discoveryPeerUuid || !this.discoveryNonce || !this.requestedMode) return false;
-    return this.rendezvous.sendData(
-      { type: "zuradio.discover", nonce: this.discoveryNonce, mode: this.requestedMode },
-      { uuid: this.discoveryPeerUuid, allowFallback: false },
-    );
+  private sendDiscovery(peerUuid?: string): boolean {
+    if (!this.rendezvous || !this.discoveryNonce || !this.requestedMode) return false;
+    const peers = peerUuid ? [peerUuid] : [...this.discoveryPeerUuids];
+    let sent = false;
+    for (const uuid of peers) {
+      sent =
+        this.rendezvous.sendData(
+          { type: "zuradio.discover", nonce: this.discoveryNonce, mode: this.requestedMode },
+          { uuid, allowFallback: false },
+        ) || sent;
+    }
+    return sent;
   }
 
-  private handleRendezvousMessage(raw: unknown): void {
+  private handleRendezvousMessage(raw: unknown, rejectedSessions: ReadonlySet<string>): void {
     const message = parseMessage(raw);
     if (
       !message ||
@@ -722,6 +783,7 @@ export class CompanionBridge {
     ) return;
     try {
       const invitation = beaconInvitation(message, this.requestedMode);
+      if (rejectedSessions.has(invitation.session)) return;
       clearTimeout(this.beaconWaiter.timer);
       this.beaconWaiter.resolve(invitation);
       this.beaconWaiter = null;
@@ -1256,4 +1318,15 @@ function constantTimeEqual(left: string, right: string): boolean {
 
 function delay(milliseconds: number): Promise<void> {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+function retryDelay(attempt: number): number {
+  return 500 * (2 ** (attempt + 1) - 1);
+}
+
+function isTransientTransportFailure(error: unknown): boolean {
+  if (!(error instanceof Error)) return true;
+  return /websocket|network|signaling|transport|room join timeout|remote connection closed|rendezvous channel is not ready|laptop did not complete authentication/i.test(
+    error.message,
+  );
 }

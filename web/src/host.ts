@@ -27,6 +27,11 @@ let positionMs = 0;
 let messageTimer = 0;
 let pendingTasks = 0;
 let taskTail: Promise<void> = Promise.resolve();
+let checkingBroadcastOwnership = false;
+let automaticBroadcastRetryTimer = 0;
+let automaticBroadcastRetryCount = 0;
+const BROADCAST_START_ATTEMPTS = 5;
+const AUTOMATIC_BROADCAST_RETRY_DELAYS_MS = [5_000, 10_000, 30_000, 60_000] as const;
 
 const audio = new AudioEngine(
   (trackId) => api.mediaUrl(trackId),
@@ -47,6 +52,7 @@ const bridge = new HostBroadcastBridge({
     if (!api.currentSnapshot) throw new Error("Player state is unavailable");
     return api.currentSnapshot;
   },
+  broadcast: () => api.broadcastStatus(),
   verify: (payload) => api.verifyRemote(payload),
   action: async (payload) => {
     const result = await api.remoteAction(payload);
@@ -63,6 +69,9 @@ const bridge = new HostBroadcastBridge({
     snapshot = api.currentSnapshot;
     render();
     return result;
+  },
+  onSessionReplaced: () => {
+    markBroadcastReplaced();
   },
   onError: (reason) => showMessage(reason, true),
 });
@@ -107,7 +116,34 @@ root.addEventListener("change", (event) => {
   }
 });
 
+window.setInterval(() => void verifyBroadcastOwnership(), 750);
 void initialize();
+
+async function verifyBroadcastOwnership(): Promise<void> {
+  const ownedSession = broadcastSession;
+  if (!ownedSession || checkingBroadcastOwnership) return;
+  checkingBroadcastOwnership = true;
+  try {
+    const current = await api.broadcastStatus();
+    if (
+      current &&
+      current.sessionId === ownedSession.sessionId &&
+      current.epoch === ownedSession.epoch
+    ) return;
+    await bridge.stop();
+    if (broadcastSession === ownedSession) markBroadcastReplaced();
+  } catch {
+    // A service restart can make one poll fail; the next successful poll decides ownership.
+  } finally {
+    checkingBroadcastOwnership = false;
+  }
+}
+
+function markBroadcastReplaced(): void {
+  broadcastSession = null;
+  showMessage("A newer Zuradio window replaced this broadcast", true);
+  render();
+}
 
 async function initialize(): Promise<void> {
   try {
@@ -126,10 +162,7 @@ async function initialize(): Promise<void> {
     render();
     if (autoBroadcast) {
       await windowReady();
-      await task(async () => {
-        await activateBroadcast(true);
-        showMessage("Broadcast started automatically", false);
-      });
+      startAutomaticBroadcast();
     }
   } catch (error) {
     renderFatal(messageOf(error));
@@ -210,13 +243,16 @@ async function handleClick(target: HTMLElement): Promise<void> {
     return;
   }
   if (action === "start-broadcast") {
+    cancelAutomaticBroadcastRetry();
     await task(async () => {
       await activateBroadcast(false);
+      automaticBroadcastRetryCount = 0;
       showMessage("Broadcast started", false);
     });
     return;
   }
   if (action === "stop-broadcast") {
+    cancelAutomaticBroadcastRetry();
     await task(async () => {
       await bridge.stop();
       await api.stopBroadcast();
@@ -304,15 +340,72 @@ async function activateBroadcast(automatic: boolean): Promise<void> {
     await api.stopBroadcast();
     broadcastSession = null;
   }
-  const session = await api.startBroadcast();
-  try {
-    await bridge.start(session, audio.broadcastStream);
-    broadcastSession = session;
-  } catch (error) {
-    await api.stopBroadcast().catch(() => undefined);
-    throw error;
+  let lastError: unknown = new Error("Broadcast setup failed");
+  for (let attempt = 0; attempt < BROADCAST_START_ATTEMPTS; attempt += 1) {
+    if (attempt > 0) await wait(retryDelay(attempt - 1));
+    let session: BroadcastSession | null = null;
+    try {
+      session = await api.startBroadcast();
+      await bridge.start(session, audio.broadcastStream);
+      broadcastSession = session;
+      render();
+      return;
+    } catch (error) {
+      lastError = error;
+      await bridge.stop().catch(() => undefined);
+      if (session) await stopBroadcastIfOwned(session);
+      broadcastSession = null;
+    }
   }
-  render();
+  throw lastError;
+}
+
+function startAutomaticBroadcast(): void {
+  void task(async () => {
+    try {
+      await activateBroadcast(true);
+      automaticBroadcastRetryCount = 0;
+      showMessage("Broadcast started automatically", false);
+    } catch (error) {
+      scheduleAutomaticBroadcastRetry();
+      throw error;
+    }
+  });
+}
+
+function scheduleAutomaticBroadcastRetry(): void {
+  if (!autoBroadcast || automaticBroadcastRetryTimer || broadcastSession) return;
+  const index = Math.min(automaticBroadcastRetryCount, AUTOMATIC_BROADCAST_RETRY_DELAYS_MS.length - 1);
+  const delayMs = AUTOMATIC_BROADCAST_RETRY_DELAYS_MS[index] ?? 60_000;
+  automaticBroadcastRetryCount += 1;
+  automaticBroadcastRetryTimer = window.setTimeout(() => {
+    automaticBroadcastRetryTimer = 0;
+    startAutomaticBroadcast();
+  }, delayMs);
+}
+
+function cancelAutomaticBroadcastRetry(): void {
+  if (automaticBroadcastRetryTimer) window.clearTimeout(automaticBroadcastRetryTimer);
+  automaticBroadcastRetryTimer = 0;
+}
+
+async function stopBroadcastIfOwned(session: BroadcastSession): Promise<void> {
+  try {
+    const current = await api.broadcastStatus();
+    if (current?.sessionId === session.sessionId && current.epoch === session.epoch) {
+      await api.stopBroadcast();
+    }
+  } catch {
+    // The retry rotates the session; a failed cleanup must not hide the setup error.
+  }
+}
+
+function wait(milliseconds: number): Promise<void> {
+  return new Promise((resolve) => window.setTimeout(resolve, milliseconds));
+}
+
+function retryDelay(attempt: number): number {
+  return 500 * (2 ** (attempt + 1) - 1);
 }
 
 async function saveMetadata(form: HTMLFormElement): Promise<void> {

@@ -74,8 +74,8 @@ jobs:
       - name: Install locked browser dependencies
         run: npm ci
         working-directory: web
-      - name: Install Chromium runtime
-        run: npx playwright install --with-deps chromium
+      - name: Install Chromium, Firefox, and WebKit runtimes
+        run: npx playwright install --with-deps chromium firefox webkit
         working-directory: web
       - name: Build production web assets
         run: npm run build

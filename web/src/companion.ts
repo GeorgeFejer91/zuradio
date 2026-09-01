@@ -446,6 +446,7 @@ function renderPasswordDialog(mode: RemoteMode): string {
       <span class="eyebrow">${capitalize(mode)} access</span>
       <h2 id="password-title">Connect to Zuradio</h2>
       <p class="muted">Enter the password stored on the laptop.</p>
+      ${busy ? `<p class="muted" role="status" data-testid="connection-progress">${escapeHtml(connectionStatus)}</p>` : ""}
       ${errorMessage ? `<p class="notice error" role="alert">${escapeHtml(errorMessage)}</p>` : ""}
       <form data-connect-form data-mode="${mode}">
         <label for="password">Password</label>
@@ -481,9 +482,9 @@ function renderUpload(): string {
       <label class="button" for="upload-folder">Choose folder</label>
       <input id="upload-folder" data-upload-folder type="file" multiple webkitdirectory />
     </div>
-    <p class="muted">${selectedFiles.length ? `${selectedFiles.length} file${selectedFiles.length === 1 ? "" : "s"} selected` : "Choose individual audio files or an entire folder."}</p>
+    <p class="muted" data-testid="upload-selection">${selectedFiles.length ? `${selectedFiles.length} file${selectedFiles.length === 1 ? "" : "s"} selected` : "Choose individual audio files or an entire folder."}</p>
     <button class="primary" data-action="upload" data-testid="upload" ${selectedFiles.length && !busy ? "" : "disabled"}>Upload to Zuradio</button>
-    ${uploadProgress ? `<p class="upload-progress" role="status">${escapeHtml(uploadProgress)}</p>` : ""}
+    ${uploadProgress ? `<p class="upload-progress" role="status" data-testid="upload-progress">${escapeHtml(uploadProgress)}</p>` : ""}
     ${importedFiles.length ? `<ol class="imported-list">${importedFiles.map((file) => `<li><strong>${escapeHtml(file.title)}</strong><span>${escapeHtml(file.artist)} · ${escapeHtml(file.album)}${file.year ? ` · ${file.year}` : ""}</span></li>`).join("")}</ol>` : ""}
   </section>`;
 }
