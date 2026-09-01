@@ -16,7 +16,14 @@ for attempt in 1 2 3 4 5 6 7 8 9 10; do
   if [ -f "$runtime_file" ]; then
     host_url=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1], encoding="utf-8"))["hostUrl"])' "$runtime_file" 2>/dev/null || true)
     case "$host_url" in
-      http://127.0.0.1:*/host/\#bootstrap=*) break ;;
+      http://127.0.0.1:*/host/\#bootstrap=*)
+        # A service restart can briefly leave the previous runtime file behind.
+        # Verify both the loopback port and bootstrap token before opening it.
+        if python3 -c 'import json,sys,urllib.parse,urllib.request; u=urllib.parse.urlsplit(sys.argv[1]); base=f"{u.scheme}://{u.netloc}"; token=urllib.parse.parse_qs(u.fragment).get("bootstrap", [""])[0]; request=urllib.request.Request(f"{base}/api/v1/bootstrap", data=json.dumps({"token": token}).encode(), headers={"Content-Type": "application/json", "Origin": base}); urllib.request.urlopen(request, timeout=1).read(1)' "$host_url" >/dev/null 2>&1; then
+          break
+        fi
+        host_url=
+        ;;
       *) host_url= ;;
     esac
   fi
