@@ -227,6 +227,15 @@ test("streams from the laptop while enforcing listener and controller roles", as
     const trustedConnectMs = Date.now() - trustedConnectStarted;
     expect(trustedConnectMs, "trusted-browser passwordless reconnect latency").toBeLessThan(MAX_CONNECT_LATENCY_MS);
     await expect(trustedController.getByLabel("Remote player controls")).toBeVisible();
+    const trustedShuffle = trustedController.getByRole("button", { name: "Shuffle", exact: true });
+    const trustedShuffleBefore = (await hostShuffle.getAttribute("aria-pressed")) === "true";
+    const trustedCommandStarted = Date.now();
+    await trustedShuffle.click();
+    await expect(hostShuffle).toHaveAttribute("aria-pressed", String(!trustedShuffleBefore));
+    const trustedCommandRttMs = Date.now() - trustedCommandStarted;
+    expect(trustedCommandRttMs, "trusted-browser command acknowledgement latency").toBeLessThan(MAX_COMMAND_RTT_MS);
+    await trustedShuffle.click();
+    await expect(hostShuffle).toHaveAttribute("aria-pressed", String(trustedShuffleBefore));
     await trustedController.getByRole("button", { name: "Disconnect", exact: true }).click();
     await trustedController.getByRole("button", { name: "Forget this browser", exact: true }).click();
     await expect(trustedController.getByTestId("trusted-device")).toHaveCount(0);
@@ -238,7 +247,11 @@ test("streams from the laptop while enforcing listener and controller roles", as
     await listener.getByRole("button", { name: "Disconnect", exact: true }).click();
     await expect(listener.getByTestId("connect-listen")).toBeVisible();
     await test.info().attach("latency-metrics.json", {
-      body: JSON.stringify({ listenerConnectMs, controllerConnectMs, commandRttMs, trustedConnectMs }, null, 2),
+      body: JSON.stringify(
+        { listenerConnectMs, controllerConnectMs, commandRttMs, trustedConnectMs, trustedCommandRttMs },
+        null,
+        2,
+      ),
       contentType: "application/json",
     });
     expect(errors, "browser page and console errors").toEqual([]);

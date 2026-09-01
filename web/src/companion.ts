@@ -61,7 +61,6 @@ const bridge = new CompanionBridge(audio, {
   },
   onStatus(value) {
     connectionStatus = value;
-    connected = value === "Listening live" || value === "Controller connected" || value === "Upload connected";
     render();
   },
   onError(value) {

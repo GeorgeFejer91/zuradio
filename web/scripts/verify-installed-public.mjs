@@ -111,16 +111,22 @@ try {
   if ((await trustedController.locator(".controller-panel .track-row").count()) !== expectedTracks) {
     throw new Error("Trusted browser connected without the installed music library");
   }
+  const trustedShuffle = trustedController.getByRole("button", { name: "Shuffle", exact: true });
+  const hostShuffle = host.getByRole("button", { name: "Shuffle", exact: true });
+  const trustedShuffleBefore = (await hostShuffle.getAttribute("aria-pressed")) === "true";
   const trustedCommandStarted = performance.now();
-  await trustedController.getByTestId("remote-play-pause").click();
+  await trustedShuffle.click();
+  await hostShuffle.waitFor({ state: "visible" });
   await host.waitForFunction(
-    () => document.querySelector('[data-testid="play-pause"]')?.getAttribute("aria-label") === "Play",
+    (expected) => document.querySelector('[aria-label="Shuffle"]')?.getAttribute("aria-pressed") === expected,
+    String(!trustedShuffleBefore),
   );
   const trustedCommandRttMs = Math.round(performance.now() - trustedCommandStarted);
   assertBelow("trusted-browser command acknowledgement", trustedCommandRttMs, maxCommandMs);
-  await trustedController.getByTestId("remote-play-pause").click();
+  await trustedShuffle.click();
   await host.waitForFunction(
-    () => document.querySelector('[data-testid="play-pause"]')?.getAttribute("aria-label") === "Pause",
+    (expected) => document.querySelector('[aria-label="Shuffle"]')?.getAttribute("aria-pressed") === expected,
+    String(trustedShuffleBefore),
   );
   await trustedController.getByRole("button", { name: "Disconnect", exact: true }).click();
 

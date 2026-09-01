@@ -10,7 +10,7 @@ Low latency, fast connection establishment, and immediate UI feedback are absolu
 - Keep player commands on the direct ordered WebRTC data channel. Do not add polling, fixed sleeps, proxy round trips, media uploads, or page reloads to an interactive command path.
 - Run independent setup work concurrently where safe. The authenticated control surface must not wait for optional audio-analysis, visualizer, or secondary listener setup.
 - Preserve the 210,000-round password proof, role boundaries, replay protection, and no-music-on-GitHub-Pages rule. Performance work may not weaken authentication or authorization.
-- Preserve the one-password/24-hour trusted-browser flow: never store the raw password, require a fresh nonce-bound proof on reconnect, enforce device binding and expiry in Rust, and invalidate remembered credentials when the laptop password changes.
+- Preserve the one-password/24-hour trusted-browser flow: never store the raw password, require a fresh nonce-bound proof on reconnect, enforce device binding and expiry in Rust, and invalidate remembered credentials when the laptop password changes. The gate must send and acknowledge a real control command after the passwordless reconnect; rendering the controls alone is not proof.
 - Report measured connection and command latency in the verification artifact and final handoff. A feature that works but introduces an avoidable responsiveness regression is not complete.
 
 ## Required completion sequence

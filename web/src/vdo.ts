@@ -34,8 +34,10 @@ export interface HostBridgeCallbacks {
 
 interface HostGrant {
   grantId: string;
+  transportUuid: string;
   peerId: string;
   mode: RemoteMode;
+  expiresAt: number;
 }
 
 interface PendingRequest {
@@ -93,6 +95,7 @@ export class HostBroadcastBridge {
   private control: VDONinja | null = null;
   private session: BroadcastSession | null = null;
   private grants = new Map<string, HostGrant>();
+  private latestGrantByTransport = new Map<string, string>();
 
   constructor(private readonly callbacks: HostBridgeCallbacks) {}
 
@@ -127,12 +130,6 @@ export class HostBroadcastBridge {
       "dataReceived",
       ((event: VDONinjaEvent<"dataReceived">) => {
         void this.handleControl(event.detail.uuid, event.detail.data);
-      }) as EventListener,
-    );
-    control.addEventListener(
-      "peerDisconnected",
-      ((event: VDONinjaEvent<"peerDisconnected">) => {
-        this.grants.delete(event.detail.uuid);
       }) as EventListener,
     );
     await Promise.all([listen.connect(), rendezvous.connect(), control.connect()]);
@@ -171,9 +168,13 @@ export class HostBroadcastBridge {
 
   publishState(snapshot: AppSnapshot): void {
     this.listen?.sendData({ type: "zuradio.state", state: nowPlaying(snapshot) });
-    for (const [uuid, grant] of this.grants) {
+    this.pruneGrants();
+    for (const grant of this.grants.values()) {
       if (grant.mode === "control") {
-        this.control?.sendData({ type: "zuradio.snapshot", snapshot }, { uuid, allowFallback: false });
+        this.control?.sendData(
+          { type: "zuradio.snapshot", snapshot },
+          { uuid: grant.transportUuid, allowFallback: false },
+        );
       }
     }
   }
@@ -181,6 +182,7 @@ export class HostBroadcastBridge {
   async stop(): Promise<void> {
     this.session = null;
     this.grants.clear();
+    this.latestGrantByTransport.clear();
     const listen = this.listen;
     const rendezvous = this.rendezvous;
     const control = this.control;
@@ -248,10 +250,20 @@ export class HostBroadcastBridge {
           scopes: string[];
           trustedDevice?: { token: string; expiresAt: number } | null;
         };
-        this.grants.set(uuid, { grantId: response.grantId, peerId, mode });
+        const previousGrantId = this.latestGrantByTransport.get(uuid);
+        if (previousGrantId) this.grants.delete(previousGrantId);
+        this.latestGrantByTransport.set(uuid, response.grantId);
+        this.grants.set(response.grantId, {
+          grantId: response.grantId,
+          transportUuid: uuid,
+          peerId,
+          mode,
+          expiresAt: Date.now() + response.expiresInSeconds * 1_000,
+        });
         this.control?.sendData(
           {
             type: "zuradio.ready",
+            grantId: response.grantId,
             mode,
             serverProof: response.serverProof,
             expiresInSeconds: response.expiresInSeconds,
@@ -272,8 +284,25 @@ export class HostBroadcastBridge {
         );
         return;
       }
-      const grant = this.grants.get(uuid);
-      if (!grant) throw new Error("This browser is not authenticated");
+      const suppliedGrantId =
+        typeof message.grantId === "string" ? stringField(message, "grantId", 256) : null;
+      const grantId = suppliedGrantId ?? this.latestGrantByTransport.get(uuid);
+      const grant = grantId ? this.grants.get(grantId) : null;
+      if (
+        !grant ||
+        grant.transportUuid !== uuid ||
+        stringField(message, "peerId", 128) !== grant.peerId ||
+        grant.expiresAt <= Date.now()
+      ) {
+        throw new Error("This browser is not authenticated");
+      }
+      if (message.type === "zuradio.goodbye") {
+        this.grants.delete(grant.grantId);
+        if (this.latestGrantByTransport.get(uuid) === grant.grantId) {
+          this.latestGrantByTransport.delete(uuid);
+        }
+        return;
+      }
       const sequence = numberField(message, "sequence");
       if (message.type === "zuradio.action") {
         if (grant.mode !== "control") throw new Error("This grant cannot control the player");
@@ -318,6 +347,17 @@ export class HostBroadcastBridge {
       this.callbacks.onError(event.detail.error?.message ?? "VDO.Ninja connection failed");
     }) as EventListener);
   }
+
+  private pruneGrants(): void {
+    const now = Date.now();
+    for (const [grantId, grant] of this.grants) {
+      if (grant.expiresAt > now) continue;
+      this.grants.delete(grantId);
+      if (this.latestGrantByTransport.get(grant.transportUuid) === grantId) {
+        this.latestGrantByTransport.delete(grant.transportUuid);
+      }
+    }
+  }
 }
 
 export interface CompanionCallbacks {
@@ -350,6 +390,7 @@ export class CompanionBridge {
   private requestedMode: RemoteMode | null = null;
   private discoveryPeerUuid: string | null = null;
   private controlPeerUuid: string | null = null;
+  private grantId: string | null = null;
   private analysisContext: AudioContext | null = null;
   private analysisSource: MediaStreamAudioSourceNode | null = null;
   private analysisAnalyser: AnalyserNode | null = null;
@@ -593,6 +634,12 @@ export class CompanionBridge {
   }
 
   async disconnect(): Promise<void> {
+    if (this.control && this.controlPeerUuid && this.grantId) {
+      this.control.sendData(
+        { type: "zuradio.goodbye", grantId: this.grantId, peerId: this.peerId },
+        { uuid: this.controlPeerUuid, allowFallback: false },
+      );
+    }
     this.ready = false;
     this.helloSent = false;
     this.helloSending = false;
@@ -603,6 +650,7 @@ export class CompanionBridge {
     this.requestedMode = null;
     this.discoveryPeerUuid = null;
     this.controlPeerUuid = null;
+    this.grantId = null;
     this.authKey?.fill(0);
     this.authKey = null;
     this.connectionAuth = null;
@@ -753,6 +801,7 @@ export class CompanionBridge {
       }
       this.pendingServerProof = null;
       this.pendingHello = null;
+      this.grantId = stringField(message, "grantId", 256);
       if (
         this.connectionAuth?.kind === "password" &&
         this.connectionRoute &&
@@ -904,11 +953,12 @@ export class CompanionBridge {
   }
 
   private sendRequest(type: string, payload: Record<string, unknown>, timeout = 10_000): Promise<unknown> {
-    if (!this.control || !this.controlPeerUuid || !this.ready) {
+    if (!this.control || !this.controlPeerUuid || !this.grantId || !this.ready) {
       return Promise.reject(new Error("Remote data channel is not ready"));
     }
     const control = this.control;
     const controlPeerUuid = this.controlPeerUuid;
+    const grantId = this.grantId;
     const sequence = this.sequence;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
@@ -917,7 +967,7 @@ export class CompanionBridge {
       }, timeout);
       this.pendingRequests.set(sequence, { resolve, reject, timer });
       const sent = control.sendData(
-        { type, peerId: this.peerId, sequence, ...payload },
+        { type, grantId, peerId: this.peerId, sequence, ...payload },
         { uuid: controlPeerUuid, allowFallback: false },
       );
       if (!sent) {

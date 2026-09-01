@@ -101,7 +101,8 @@ the binary and web files installed under `~/.local` using an isolated database:
    `MediaStreamTrack`, sanitized listener now-playing data, and controller
    authentication. The controller then reloads in the same browser context and
    reconnects without a password dialog using the 24-hour credential; the test
-   also proves that browser storage does not contain the raw password.
+   also proves that browser storage does not contain the raw password and that
+   a fresh control command is acknowledged after the passwordless reconnect.
 2. Scan, search, album, artist, group-to-library navigation, and library browsing.
 3. Phone-width playlist-library create, select, populate through the dedicated
    track picker, reorder, remove, rename, save, reopen, and delete.

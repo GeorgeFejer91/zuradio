@@ -97,7 +97,10 @@ over the exact peer data channel with WebSocket fallback disabled. Every
 companion then proves the same local password with HMAC over a versioned
 transcript that includes session, epoch, mode, peer ID, and nonce. Rust returns
 a server proof and creates a short, revocable mode-scoped grant. Every
-action/upload also carries a strictly increasing sequence. Upload grants cannot
+action/upload carries that random grant ID, its bound peer ID, and a strictly
+increasing sequence. The browser sends an explicit goodbye when it disconnects;
+transport UUID reuse cannot revoke or impersonate a newly authenticated grant.
+Upload grants cannot
 control or listen; listener grants cannot inspect the library or mutate it;
 only listen/control receive the live audio route.
 
