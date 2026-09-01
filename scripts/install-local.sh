@@ -24,6 +24,7 @@ chmod 0700 "$data_dir"
 install -m 0755 "$project_dir/target/release/zuradio" "$install_root/zuradio"
 install -m 0755 "$project_dir/target/release/zuradio" "$binary_dir/zuradio"
 install -m 0755 "$project_dir/packaging/linux/zuradio-launch" "$binary_dir/zuradio-launch"
+install -m 0755 "$project_dir/packaging/linux/zuradio-desktop-launch" "$binary_dir/zuradio-desktop-launch"
 install -m 0644 "$project_dir/packaging/linux/zuradio.service" "$service_dir/zuradio.service"
 install -m 0644 "$project_dir/packaging/icons/zuradio.svg" "$icon_dir/zuradio.svg"
 mkdir -p "$install_root/web"
@@ -31,8 +32,8 @@ find "$install_root/web" -type f -delete
 find "$install_root/web" -depth -mindepth 1 -type d -empty -delete
 cp -R "$project_dir/web/dist/." "$install_root/web/"
 
-launcher_path="$binary_dir/zuradio-launch"
-sed "s|@LAUNCHER@|$launcher_path|g" "$project_dir/packaging/linux/zuradio.desktop" > "$desktop_dir/zuradio.desktop"
+launcher_path="$binary_dir/zuradio-desktop-launch"
+sed "s|@DESKTOP_LAUNCHER@|$launcher_path|g" "$project_dir/packaging/linux/zuradio-desktop.desktop" > "$desktop_dir/zuradio.desktop"
 chmod 0644 "$desktop_dir/zuradio.desktop"
 
 systemctl --user daemon-reload
@@ -58,4 +59,4 @@ if [ -n "$music_dir" ] && [ -d "$music_dir" ]; then
 fi
 
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$desktop_dir" || true
-printf 'Zuradio installed. Launch it from the application menu or run: %s\n' "$binary_dir/zuradio-launch"
+printf 'Zuradio installed. Launch it from the application menu or run: %s\n' "$binary_dir/zuradio-desktop-launch"
