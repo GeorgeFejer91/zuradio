@@ -1,0 +1,55 @@
+:root {
+  color-scheme: dark;
+  font-family: "Aptos", "Noto Sans", "Helvetica Neue", sans-serif;
+  background: #11110f;
+  color: #f2f0e8;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  min-height: 100%;
+  margin: 0;
+}
+
+body {
+  display: grid;
+  place-items: center;
+  background: #11110f;
+}
+
+main {
+  display: flex;
+  width: min(420px, calc(100% - 48px));
+  align-items: center;
+  gap: 18px;
+  padding: 22px;
+  border: 1px solid #383831;
+  border-radius: 10px;
+  background: #191916;
+}
+
+img {
+  flex: 0 0 auto;
+}
+
+h1 {
+  margin: 0 0 5px;
+  font-size: 20px;
+  letter-spacing: -0.015em;
+}
+
+p {
+  margin: 0;
+  color: #aaa99d;
+  font-size: 14px;
+  line-height: 1.45;
+}
+
+.help {
+  margin-top: 9px;
+  font-size: 12px;
+}

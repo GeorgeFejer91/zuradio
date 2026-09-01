@@ -4,9 +4,10 @@ Qualification date: 2026-09-01, Europe/Berlin.
 
 ## Result
 
-The Rust service/browser application is an installed Linux release candidate on
-this laptop. The static Web Companion artifact is build-verified but not yet
-published. A native Tauri package is not claimed.
+Zuradio is an installed Linux release candidate on this laptop: Rust service,
+complete CLI, least-privilege Tauri shell, Debian package, AppImage, and public
+Web Companion. Native packages remain unsigned, and physical-phone,
+forced-TURN, and endurance qualification remain release-channel gates.
 
 ## Installed result
 
@@ -14,6 +15,8 @@ published. A native Tauri package is not claimed.
   `0.1.0`.
 - Service: `zuradio.service`, enabled and active as a systemd user service.
 - Desktop launcher: `~/.local/share/applications/zuradio.desktop`.
+- Native AppImage: `~/.local/lib/zuradio/Zuradio.AppImage`, bundle identifier
+  `com.georgefejer.zuradio`.
 - Data directory: `~/.local/share/zuradio`, mode 0700.
 - Per-launch runtime credentials: `runtime.json`, mode 0600.
 - Network listener: random loopback-only port.
@@ -29,13 +32,30 @@ and reported success.
 
 ### Rust
 
-- `cargo test --workspace`: 9 passed, 0 failed.
+- `cargo test --workspace`: 11 Rust domain, daemon, CLI, and Tauri shell tests
+  passed, 0 failed.
 - `cargo clippy --workspace --all-targets -- -D warnings`: passed.
 - Core coverage includes stale-revision rejection, listener mutation denial,
   command-ID deduplication, playlist creation/rename, queue shuffle restoration,
   symlink refusal, JavaScript-safe broadcast epochs, explicit CLI boolean
   parsing, and single-Range parsing.
 - Optimized `zuradio-daemon` release build: passed.
+
+### Native desktop shell
+
+- Tauri v2 release source compiled against WebKitGTK 2.52.6 from a local build
+  sysroot without modifying the system package database.
+- Debian and self-contained AppImage bundles were built; inspection found the
+  host/companion web resources, no music files, and bundled GStreamer playback
+  plug-ins including `appsink` and `playback` in the AppImage.
+- The installed AppImage launched at the laptop's 2360 × 1520 HiDPI size and
+  rendered the complete library, queue, transport, scan, search, and broadcast
+  interface.
+- Process inspection found one healthy systemd daemon plus one desktop shell;
+  the shell reused the existing authority instead of starting a duplicate.
+- The Tauri capability grants zero WebView permissions. Unit tests reject
+  HTTPS, `localhost`, non-loopback hosts, missing bootstrap secrets, wrong
+  paths, and follow-up navigation to a different loopback port.
 
 ### Installed CLI
 
@@ -84,6 +104,12 @@ Page and console error collectors were empty in the passing live-stream run.
 Phone-width screenshots were visually inspected for the host, controller, and
 listener layouts.
 
+The final installed-byte rerun used the installed optimized daemon and web
+assets with a disposable database and the public Pages companion. All 10 tests
+passed in 30.9 seconds. The first harness attempt correctly exposed missing
+fixture pre-scan and preview-server setup; after those test prerequisites were
+made explicit, the complete matrix passed without a product-code change.
+
 ## Static companion boundary
 
 `npm run build:pages` produced a 180 KiB `web/dist-pages` artifact containing
@@ -98,6 +124,11 @@ An automated invariant check found no AAC, AIFF, ALAC, FLAC, M4A, MP3, MP4,
 OGG, Opus, WAV, or WebM files and no `/api/v1/media` reference. The Pages
 workflow repeats typechecking, unit tests, the companion-only build, and those
 negative assertions before upload.
+
+The public source is [GeorgeFejer91/zuradio](https://github.com/GeorgeFejer91/zuradio).
+The [Zuradio Web Companion](https://georgefejer91.github.io/zuradio/) is live
+over HTTPS, returns the companion-only interface, and passed both the Verify
+Zuradio and Deploy Zuradio Web Companion GitHub Actions workflows.
 
 ## Defects found and corrected during qualification
 
@@ -125,21 +156,18 @@ negative assertions before upload.
 - Mobile host controls and queue content were previously hidden; all output and
   queue controls are now visible at phone width.
 
-## Remaining distribution gates
+## Remaining release-channel gates
 
 These are intentionally not represented as completed tests:
 
-- Create and publish the public `GeorgeFejer91/zuradio` GitHub repository, enable
-  Pages through GitHub Actions, and verify the public URL. Publication exposes
-  the MIT source and therefore needs an explicit repository-visibility decision.
-- Choose a permanent reverse-DNS bundle identifier before scaffolding/signing a
-  Tauri v2 shell. This laptop also lacks the WebKitGTK development headers needed
-  for a normal local Tauri Linux build.
 - Run a physical-phone test over a different network and a forced-TURN route.
 - Run long-duration and multiple-simultaneous-listener endurance tests.
 - Add malformed-media fuzzing and decoder isolation before accepting untrusted
   uploads or libraries from other users.
+- Sign Linux artifacts and add Windows code signing, macOS notarization,
+  auto-update metadata, and supply-chain attestations before a stable native
+  release.
 
-The current local app remains useful without those distribution steps: it is
-installed, plays and catalogs local music, exposes its full CLI, and can use a
-locally served companion for the already-passing WebRTC path.
+The release candidate is installed, plays and catalogs local music, exposes its
+full CLI, and uses the public static companion for the already-passing WebRTC
+path without hosting the music collection.

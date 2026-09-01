@@ -6,7 +6,7 @@ use serde::{Deserialize, Serialize, de::DeserializeOwned};
 use uuid::Uuid;
 use zuradio_core::{Action, ActionRequest, ActionResult, Actor, AppSnapshot};
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeFile {
     pub base_url: String,
@@ -20,6 +20,11 @@ pub struct Client {
 }
 
 impl Client {
+    /// Loads the protected runtime handshake written by a running authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the runtime file is absent, unreadable, or invalid.
     pub fn from_data_dir(data_dir: &Path) -> anyhow::Result<Self> {
         let path = data_dir.join("runtime.json");
         let content = fs::read_to_string(&path)
@@ -28,6 +33,11 @@ impl Client {
         Ok(Self { runtime })
     }
 
+    /// Fetches the canonical application snapshot.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the authority is unavailable or rejects the request.
     pub fn snapshot(&self) -> anyhow::Result<AppSnapshot> {
         self.get("/api/v1/snapshot")
     }
@@ -37,6 +47,11 @@ impl Client {
         &self.runtime.host_url
     }
 
+    /// Scans the supplied local music roots through the running authority.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the authority is unavailable or rejects a root.
     pub fn scan(&self, roots: &[PathBuf]) -> anyhow::Result<AppSnapshot> {
         #[derive(Serialize)]
         struct ScanRequest<'a> {
@@ -45,6 +60,11 @@ impl Client {
         self.post("/api/v1/scan", &ScanRequest { roots })
     }
 
+    /// Applies one closed domain action to canonical state.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when state cannot be read or the action is rejected.
     pub fn action(&self, action: Action) -> anyhow::Result<ActionResult> {
         let snapshot = self.snapshot()?;
         let request = ActionRequest {

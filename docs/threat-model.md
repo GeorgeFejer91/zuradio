@@ -71,15 +71,18 @@ protocol. Direct Internet exposure of the loopback daemon is out of scope.
 - Listener UI immutability and controller player/queue/playlist behavior.
 - Companion-only Pages artifact inspection: no media files and no local media
   API reference.
+- Tauri v2 shell URL validation, zero-command capability, exact loopback
+  navigation policy, bundled-resource inspection, real WebKitGTK launch, and
+  absence of a duplicate authority process when the systemd service is healthy.
+- Public GitHub Pages deployment over HTTPS with successful verification and
+  deployment workflows.
 
 ## Not yet qualified
 
 - Malicious media corpus fuzzing and decoder sandboxing.
-- Browser/WebView interoperability beyond Chromium on this Linux laptop.
+- WebView runtime behavior on Windows/WebView2 and macOS/WKWebView beyond the
+  host-native CI compile matrix.
 - TURN trust, availability, bandwidth, and abuse limits.
 - Forced-TURN, physical-phone, multi-listener, and long-duration endurance.
 - Password-authenticated key exchange for memorable human passphrases.
-- A permanent Tauri bundle identifier, signed native packages, auto-update, and
-  supply-chain attestations.
-- Public GitHub Pages deployment; the workflow is prepared but the repository
-  has not yet been created or published.
+- Native code signing/notarization, auto-update, and supply-chain attestations.

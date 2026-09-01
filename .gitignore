@@ -3,6 +3,7 @@
 /web/dist-pages/
 /web/node_modules/
 /web/test-results/
+/apps/zuradio-desktop/src-tauri/gen/
 /.zuradio/
 *.db-shm
 *.db-wal

@@ -4,9 +4,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
 use zuradio_core::{Action, RepeatMode};
-
-mod client;
-mod server;
+use zuradio_daemon::{client, default_data_dir, server};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -269,16 +267,6 @@ fn print_value<T: Serialize>(value: &T, _json: bool) {
     if let Ok(rendered) = serde_json::to_string_pretty(value) {
         println!("{rendered}");
     }
-}
-
-fn default_data_dir() -> PathBuf {
-    if let Some(data_home) = std::env::var_os("XDG_DATA_HOME") {
-        return PathBuf::from(data_home).join("zuradio");
-    }
-    std::env::var_os("HOME").map_or_else(
-        || PathBuf::from(".zuradio"),
-        |home| PathBuf::from(home).join(".local/share/zuradio"),
-    )
 }
 
 #[cfg(test)]

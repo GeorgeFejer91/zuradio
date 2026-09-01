@@ -18,9 +18,9 @@ jobs:
       - name: Check formatting
         run: cargo fmt --all -- --check
       - name: Run Rust tests
-        run: cargo test --workspace --locked
+        run: cargo test --workspace --exclude zuradio-desktop --locked
       - name: Reject Clippy warnings
-        run: cargo clippy --workspace --all-targets --locked -- -D warnings
+        run: cargo clippy --workspace --exclude zuradio-desktop --all-targets --locked -- -D warnings
 
   web:
     runs-on: ubuntu-latest
@@ -59,3 +59,34 @@ jobs:
             echo "The static companion must not contain the laptop media endpoint" >&2
             exit 1
           fi
+
+  desktop:
+    name: Desktop (${{ matrix.os }})
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, windows-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: actions/setup-node@v6
+        with:
+          node-version: 22
+          cache: npm
+          cache-dependency-path: web/package-lock.json
+      - name: Install Linux WebView development packages
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y libwebkit2gtk-4.1-dev libgtk-3-dev libssl-dev librsvg2-dev
+      - name: Build packaged web resources
+        run: npm ci && npm run build
+        working-directory: web
+      - name: Check the Tauri shell
+        run: cargo check -p zuradio-desktop --locked
+      - name: Test the Tauri shell
+        run: cargo test -p zuradio-desktop --locked
+      - name: Reject desktop Clippy warnings
+        run: cargo clippy -p zuradio-desktop --all-targets --locked -- -D warnings
+      - name: Build the host-native release binary
+        run: cargo build -p zuradio-desktop --release --locked

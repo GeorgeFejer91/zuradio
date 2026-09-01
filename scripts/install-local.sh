@@ -16,7 +16,7 @@ npm test
 npm run build
 
 cd "$project_dir"
-cargo test --workspace
+cargo test --workspace --exclude zuradio-desktop
 cargo build --release -p zuradio-daemon
 
 mkdir -p "$install_root/web" "$binary_dir" "$service_dir" "$desktop_dir" "$icon_dir" "$data_dir"

@@ -14,7 +14,7 @@ flowchart LR
   Music["Local music folders"] --> Core["Rust core\ncatalog · playlists · queue · policy"]
   Core --> Audio["Authenticated Range endpoint\nWeb Audio host player"]
   CLI["zuradio CLI"] --> Core
-  Desktop["Linux service + desktop launcher"] --> Core
+  Desktop["Tauri v2 shell or Linux service"] --> Core
   Core <--> Host["Loopback host bridge\nexplicit Start Broadcast"]
   Host -->|"live audio only"| VDO["VDO.Ninja WebRTC transport"]
   Host <--> |"typed commands + state"| VDO
@@ -32,8 +32,13 @@ flowchart LR
 - `web`: local host bridge and static companion. The VDO.Ninja SDK lives only
   here behind a small transport interface.
 - `packaging/linux`: the installed systemd user service, application-menu entry,
-  and launcher. A future Tauri shell must remain thin and must not introduce a
-  second player or bypass the core's command boundary.
+  AppImage installer, and launchers.
+- `apps/zuradio-desktop`: a thin Tauri v2/WebKitGTK shell. It first validates
+  and reuses the protected runtime handshake of a healthy service; otherwise it
+  starts `zuradio-daemon` in process. It exposes no Tauri IPC permissions,
+  permits top-level navigation only to the packaged startup page and an exact
+  `http://127.0.0.1:<port>/host/#bootstrap=…` URL, and never loads the hosted
+  companion into a privileged WebView.
 
 ## One authority, many adapters
 

@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
+use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::path::{Path, PathBuf};
 use std::process::Command;
@@ -27,7 +28,7 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::net::TcpListener;
-use tokio::sync::broadcast;
+use tokio::sync::{broadcast, oneshot};
 use tokio_util::io::ReaderStream;
 use tower_http::services::ServeDir;
 use uuid::Uuid;
@@ -151,7 +152,33 @@ enum BlockingScanError {
     Core(CoreError),
 }
 
+/// Runs the loopback authority until the process receives an interrupt signal.
+///
+/// # Errors
+///
+/// Returns an error if authority initialization or serving fails.
 pub async fn serve(options: ServeOptions) -> anyhow::Result<()> {
+    serve_with_shutdown(options, None, async {
+        let _ = tokio::signal::ctrl_c().await;
+    })
+    .await
+}
+
+/// Runs the loopback authority until `shutdown` resolves and optionally reports
+/// the protected runtime handshake after the listener is ready.
+///
+/// # Errors
+///
+/// Returns an error if the catalog, listener, runtime handshake, or HTTP server
+/// cannot be initialized or operated.
+pub async fn serve_with_shutdown<F>(
+    options: ServeOptions,
+    ready: Option<oneshot::Sender<RuntimeFile>>,
+    shutdown: F,
+) -> anyhow::Result<()>
+where
+    F: Future<Output = ()> + Send + 'static,
+{
     fs::create_dir_all(&options.data_dir).context("creating Zuradio data folder")?;
     let database_path = options.data_dir.join("zuradio.db");
     let core = ZuradioCore::open(&database_path).context("opening Zuradio catalog")?;
@@ -205,24 +232,23 @@ pub async fn serve(options: ServeOptions) -> anyhow::Result<()> {
     let address = listener.local_addr()?;
     let base_url = format!("http://{address}");
     let host_url = format!("{base_url}/host/#bootstrap={launch_token}");
-    write_runtime_file(
-        &options.data_dir,
-        &RuntimeFile {
-            base_url: base_url.clone(),
-            cli_token,
-            host_url: host_url.clone(),
-        },
-    )?;
-    tracing::info!(url = %host_url, "Zuradio is ready");
+    let runtime = RuntimeFile {
+        base_url: base_url.clone(),
+        cli_token,
+        host_url: host_url.clone(),
+    };
+    write_runtime_file(&options.data_dir, &runtime)?;
+    if let Some(ready) = ready {
+        let _ = ready.send(runtime);
+    }
+    tracing::info!(url = %base_url, "Zuradio is ready");
     if options.open_browser {
         open_browser(&host_url)?;
     }
 
     let shutdown_data_dir = options.data_dir.clone();
     axum::serve(listener, app)
-        .with_graceful_shutdown(async {
-            let _ = tokio::signal::ctrl_c().await;
-        })
+        .with_graceful_shutdown(shutdown)
         .await?;
     let _ = fs::remove_file(shutdown_data_dir.join("runtime.json"));
     Ok(())
@@ -867,7 +893,12 @@ fn write_runtime_file(data_dir: &Path, runtime: &RuntimeFile) -> anyhow::Result<
     Ok(())
 }
 
-pub(crate) fn open_browser(url: &str) -> anyhow::Result<()> {
+/// Opens a protected Zuradio host URL in the operating system's browser.
+///
+/// # Errors
+///
+/// Returns an error if the platform browser launcher cannot be spawned.
+pub fn open_browser(url: &str) -> anyhow::Result<()> {
     #[cfg(target_os = "linux")]
     let mut command = Command::new("xdg-open");
     #[cfg(target_os = "macos")]

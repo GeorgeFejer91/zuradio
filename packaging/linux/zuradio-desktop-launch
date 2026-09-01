@@ -1,0 +1,4 @@
+#!/bin/sh
+set -eu
+
+exec "$HOME/.local/lib/zuradio/Zuradio.AppImage"

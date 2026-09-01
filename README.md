@@ -22,7 +22,8 @@ the stream unavailable.
   mute, shuffle with order restoration, and off/all/one repeat modes.
 - A complete CLI over the same typed Rust action model used by the UI.
 - A loopback-only local web player, installed as a hardened systemd user
-  service and desktop-menu launcher on Linux.
+  service on Linux, plus a Tauri v2 desktop shell with no WebView IPC
+  permissions and the bundle identifier `com.georgefejer.zuradio`.
 - Explicit Start/Stop Broadcast controls and unrelated high-entropy listener
   and controller invitations.
 - A read-only listener UI and an authenticated controller UI with player,
@@ -55,6 +56,19 @@ Launch **Zuradio** from the application menu or run:
 ```sh
 zuradio-launch
 ```
+
+The native Tauri release candidate can be installed after building or
+downloading its AppImage:
+
+```sh
+./scripts/install-tauri-appimage.sh
+```
+
+This replaces only the application-menu launcher with the Tauri/WebKitGTK
+window. The same systemd service, CLI, library, database, and private runtime
+credentials remain authoritative. The AppImage is installed at
+`~/.local/lib/zuradio/Zuradio.AppImage` and can also be opened with
+`zuradio-desktop-launch`.
 
 The service starts at login and binds to a random `127.0.0.1` port. Its runtime
 credential file is mode 0600. The browser exchanges a one-use fragment secret
@@ -143,6 +157,9 @@ for the exact evidence and remaining distribution gates.
   playlists, favorites, history, and revision/deduplication rules.
 - `crates/zuradio-daemon`: CLI, loopback HTTP/WebSocket server, authenticated
   Range/artwork endpoints, broadcast sessions, and remote grant enforcement.
+- `apps/zuradio-desktop`: least-privilege Tauri v2 shell that reuses a healthy
+  local service or starts the same Rust authority in process; it accepts only
+  exact `127.0.0.1` host navigation and exposes no Tauri commands to the WebView.
 - `web/src/host.ts`: local player UI, Web Audio output, and VDO.Ninja publisher.
 - `web/src/companion.ts`: static listener/controller UI.
 - `packaging/linux` and `scripts/install-local.sh`: local Linux installation.
@@ -157,12 +174,13 @@ Design rationale is in [architecture](docs/architecture.md),
 
 ## Distribution status
 
-The Linux service/browser app is installed and qualified on this laptop. The
-source also keeps the domain and web layers platform-neutral. A signed Tauri v2
-shell is a separate packaging target because it needs a permanent reverse-DNS
-bundle identifier and platform WebView development packages; no identifier is
-silently invented. GitHub Pages deployment likewise requires creation of the
-public repository before the prepared workflow can publish the static companion.
+The Linux service, CLI, Tauri desktop shell, Debian package, and AppImage are
+built and qualified on this laptop. The public source is available at
+[GeorgeFejer91/zuradio](https://github.com/GeorgeFejer91/zuradio), and the
+[Zuradio Web Companion](https://georgefejer91.github.io/zuradio/) is deployed
+through GitHub Pages. The cross-platform CI matrix builds the Tauri source on
+Linux, Windows, and macOS; signing/notarization and physical-device/forced-TURN
+qualification remain separate release-channel gates.
 
 Zuradio is MIT licensed. The pinned VDO.Ninja SDK is MPL-2.0; see
 [third-party notices](THIRD_PARTY_NOTICES.md).
