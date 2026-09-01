@@ -2210,6 +2210,16 @@ button .ui-icon {
     display: none;
   }
 
+  .main .track-table-head,
+  .main .track-row {
+    grid-template-columns: 48px minmax(120px, 1.4fr) minmax(90px, 1fr) 58px 140px;
+  }
+
+  .main .track-table-head span:nth-child(4),
+  .main .track-album {
+    display: none;
+  }
+
   .is-connected.is-control {
     grid-template-columns: 290px minmax(0, 1fr);
   }
@@ -2313,6 +2323,11 @@ button .ui-icon {
   }
 
   .track-table-head {
+    display: none;
+  }
+
+  .main .track-artist,
+  .main .track-album {
     display: none;
   }
 

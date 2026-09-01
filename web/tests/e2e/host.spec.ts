@@ -242,6 +242,22 @@ test("is keyboard reachable and responsive at phone width", async ({ page }) => 
   expect(desktopLayout).toEqual({ ordered: true, playerAtBottom: true, noHorizontalOverflow: true });
   await page.screenshot({ path: "test-results/desktop-host.png", fullPage: true });
 
+  await page.setViewportSize({ width: 1050, height: 740 });
+  await page.goto(`${runtime.baseUrl}/host/#autobroadcast=0`);
+  await expect(page.locator(".track-album").first()).toBeHidden();
+  const mediumLayout = await page.locator("[data-track-row]").first().evaluate((row) => {
+    const duration = row.querySelector<HTMLElement>(".track-duration")?.getBoundingClientRect();
+    const actions = row.querySelector<HTMLElement>(".track-actions")?.getBoundingClientRect();
+    const bounds = row.getBoundingClientRect();
+    return {
+      controlsSeparated: Boolean(duration && actions && duration.right <= actions.left),
+      actionsContained: Boolean(actions && actions.right <= bounds.right),
+      noHorizontalOverflow: document.documentElement.scrollWidth <= window.innerWidth,
+    };
+  });
+  expect(mediumLayout).toEqual({ controlsSeparated: true, actionsContained: true, noHorizontalOverflow: true });
+  await page.screenshot({ path: "test-results/medium-host.png", fullPage: true });
+
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`${runtime.baseUrl}/host/#autobroadcast=0`);
   await expect(page.getByTestId("search")).toBeVisible();
