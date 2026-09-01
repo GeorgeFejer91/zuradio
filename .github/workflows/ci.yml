@@ -85,7 +85,7 @@ jobs:
       - name: Download checksum-verified CC0 fixtures
         run: scripts/fetch-test-music.sh
       - name: Create an isolated test password
-        run: printf 'zuradio-ci-browser-password\n' > "$RUNNER_TEMP/zuradio-password.txt"
+        run: printf 'zuradio-ci-%s-%s\n' "$GITHUB_RUN_ID" "$GITHUB_RUN_ATTEMPT" > "$RUNNER_TEMP/zuradio-password.txt"
       - name: Enforce the live browser completion gate
         run: scripts/verify-feature-completion.sh
         env:
