@@ -1,11 +1,11 @@
 import "./style.css";
 
-import type { Action, AppSnapshot, CompanionInvitation, Playlist } from "./types";
+import type { Action, AppSnapshot, CompanionInvitation, ImportedFile, Playlist } from "./types";
 import { parseInvitation } from "./invitation";
+import { isSupportedAudioFileName, SUPPORTED_AUDIO_ACCEPT } from "./formats";
 import { CompanionBridge, type PublicNowPlaying } from "./vdo";
 
 type ControllerView = "library" | "queue" | "playlists";
-
 const rootElement = document.querySelector<HTMLDivElement>("#app");
 if (!rootElement) throw new Error("Missing app root");
 const root: HTMLDivElement = rootElement;
@@ -30,6 +30,9 @@ let busy = false;
 let view: ControllerView = "library";
 let search = "";
 let invitationInput = "";
+let selectedFiles: File[] = [];
+let uploadProgress = "";
+let importedFiles: ImportedFile[] = [];
 let selectedPlaylistId: string | null = null;
 let pendingPlaylistSelection: Set<string> | null = null;
 
@@ -59,7 +62,7 @@ const bridge = new CompanionBridge(audio, {
   },
   onStatus(value) {
     connectionStatus = value;
-    connected = value === "Listening live" || value === "Controller connected";
+    connected = value === "Listening live" || value === "Controller connected" || value === "Upload connected";
     render();
   },
   onError(value) {
@@ -88,6 +91,12 @@ root.addEventListener("change", (event) => {
   const input = event.target as HTMLInputElement;
   if (input.matches("[data-volume]")) void send({ kind: "set_volume", volume: Number(input.value) });
   if (input.matches("[data-seek]")) void send({ kind: "seek", positionMs: Number(input.value) });
+  if (input.matches("[data-upload-files], [data-upload-folder]")) {
+    selectedFiles = Array.from(input.files ?? []).filter(isSupportedUpload);
+    importedFiles = [];
+    uploadProgress = "";
+    render();
+  }
 });
 
 root.addEventListener("submit", (event) => {
@@ -115,8 +124,15 @@ async function handleClick(target: HTMLElement): Promise<void> {
     connected = false;
     connectionStatus = "Disconnected";
     snapshot = null;
+    selectedFiles = [];
+    importedFiles = [];
+    uploadProgress = "";
     busy = false;
     render();
+    return;
+  }
+  if (name === "upload") {
+    await uploadSelectedFiles();
     return;
   }
   if (name === "view") {
@@ -222,13 +238,39 @@ async function connect(): Promise<void> {
     }
   }
   busy = true;
+  const passwordInput = root.querySelector<HTMLInputElement>("[data-password]");
+  const password = passwordInput?.value ?? "";
+  if (passwordInput) passwordInput.value = "";
   render();
   try {
-    await bridge.connect(invitation);
+    await bridge.connect(invitation, password);
     connected = true;
   } catch (error) {
     errorMessage = messageOf(error);
     connected = false;
+  } finally {
+    busy = false;
+    render();
+  }
+}
+
+async function uploadSelectedFiles(): Promise<void> {
+  if (!selectedFiles.length) return;
+  busy = true;
+  errorMessage = "";
+  importedFiles = [];
+  render();
+  try {
+    const outcome = await bridge.uploadFiles(selectedFiles, (progress) => {
+      const percent = Math.round((progress.fileReceived / progress.fileSize) * 100);
+      uploadProgress = `${progress.fileIndex + 1}/${progress.fileCount} · ${progress.fileName} · ${percent}%`;
+      render();
+    });
+    importedFiles = outcome.imported;
+    uploadProgress = `${outcome.imported.length} track${outcome.imported.length === 1 ? "" : "s"} added to the laptop library`;
+    selectedFiles = [];
+  } catch (error) {
+    errorMessage = messageOf(error);
   } finally {
     busy = false;
     render();
@@ -257,26 +299,44 @@ async function createPlaylist(name: string): Promise<void> {
 }
 
 function render(): void {
-  const role = invitation?.role ?? null;
+  const mode = invitation?.mode ?? null;
   root.innerHTML = `<main class="companion-shell" aria-busy="${busy}">
-    <header class="companion-header"><h1>Zuradio Web Companion</h1><span class="muted">${role ? capitalize(role) : "No invitation"}</span></header>
+    <header class="companion-header"><h1>Zuradio Web Companion</h1><span class="muted">${mode ? capitalize(mode) : "No invitation"}</span></header>
     ${errorMessage ? `<p class="notice error" role="alert">${escapeHtml(errorMessage)}</p>` : ""}
     <section class="connection-panel">
       <div class="section-header"><div><h2>Connection</h2><p class="muted">${escapeHtml(connectionStatus)}</p></div>
         ${connected ? `<button data-action="disconnect" ${disabled()}>Disconnect</button>` : `<button class="primary" data-action="connect" data-testid="connect" ${disabled()}>Connect</button>`}
       </div>
       ${!invitation ? `<label for="invitation">Invitation link</label><input id="invitation" data-invitation type="url" autocomplete="off" spellcheck="false" value="${escapeAttribute(invitationInput)}" placeholder="Paste the link from the Zuradio laptop" />` : `<p class="muted">The invitation is held in memory only. Its URL fragment has been removed from the address bar.</p>`}
+      ${!connected ? `<label for="password">Zuradio password</label><input id="password" data-password data-testid="password" type="password" minlength="8" maxlength="256" autocomplete="current-password" required placeholder="Password stored on the laptop" />` : ""}
     </section>
-    <section class="companion-player">
+    ${mode !== "upload" ? `<section class="companion-player">
       <h2>Now playing</h2>
       ${renderNowPlaying()}
       <div data-audio-mount></div>
       ${bridge.isController && snapshot ? renderTransport(snapshot) : ""}
-    </section>
+    </section>` : ""}
     ${bridge.isController && snapshot ? renderController(snapshot) : ""}
-    ${role === "listener" ? `<p class="muted">Listener access is read-only. This page has no player, queue, or playlist mutation controls.</p>` : ""}
+    ${bridge.isUploader ? renderUpload() : ""}
+    ${mode === "listen" ? `<p class="muted">Listen access is read-only. This page has no player, queue, playlist, or upload controls.</p>` : ""}
   </main>`;
   root.querySelector("[data-audio-mount]")?.append(audio);
+}
+
+function renderUpload(): string {
+  return `<section class="upload-panel">
+    <div class="section-header"><div><h2>Add music to this laptop</h2><p class="muted">Files travel directly through the encrypted live bridge. GitHub Pages never stores the music.</p></div></div>
+    <div class="upload-picker">
+      <label class="button" for="upload-files">Choose files</label>
+      <input id="upload-files" data-upload-files type="file" multiple accept="${SUPPORTED_AUDIO_ACCEPT}" />
+      <label class="button" for="upload-folder">Choose folder</label>
+      <input id="upload-folder" data-upload-folder type="file" multiple webkitdirectory />
+    </div>
+    <p class="muted">${selectedFiles.length ? `${selectedFiles.length} file${selectedFiles.length === 1 ? "" : "s"} selected` : "Choose individual audio files or an entire folder."}</p>
+    <button class="primary" data-action="upload" data-testid="upload" ${selectedFiles.length && !busy ? "" : "disabled"}>Upload to Zuradio</button>
+    ${uploadProgress ? `<p class="upload-progress" role="status">${escapeHtml(uploadProgress)}</p>` : ""}
+    ${importedFiles.length ? `<ol class="imported-list">${importedFiles.map((file) => `<li><strong>${escapeHtml(file.title)}</strong><span>${escapeHtml(file.artist)} · ${escapeHtml(file.album)}${file.year ? ` · ${file.year}` : ""}</span></li>`).join("")}</ol>` : ""}
+  </section>`;
 }
 
 function renderNowPlaying(): string {
@@ -405,6 +465,10 @@ function escapeAttribute(value: string): string {
 
 function messageOf(error: unknown): string {
   return error instanceof Error ? error.message : "Connection failed";
+}
+
+function isSupportedUpload(file: File): boolean {
+  return isSupportedAudioFileName(file.name);
 }
 
 window.addEventListener("pagehide", () => void bridge.disconnect());

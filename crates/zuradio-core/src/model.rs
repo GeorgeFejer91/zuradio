@@ -212,6 +212,16 @@ pub enum Action {
         track_id: String,
         favorite: bool,
     },
+    EditTrackMetadata {
+        track_id: String,
+        title: String,
+        artist: String,
+        album: String,
+        album_artist: String,
+        track_number: Option<u32>,
+        disc_number: Option<u32>,
+        year: Option<u32>,
+    },
     ReportPlayback {
         status: PlaybackStatus,
         position_ms: u64,

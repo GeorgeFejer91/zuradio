@@ -55,6 +55,7 @@ pub fn run() {
                     web_root,
                     open_browser: false,
                     companion_url: COMPANION_URL.to_owned(),
+                    remote_password_file: zuradio_daemon::default_remote_password_file(),
                 };
 
                 tauri::async_runtime::spawn(async move {

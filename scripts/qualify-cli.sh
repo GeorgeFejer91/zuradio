@@ -27,7 +27,10 @@ fi
 qualification_dir=$(mktemp -d)
 data_dir="$qualification_dir/data"
 server_log="$qualification_dir/server.log"
+password_file="$qualification_dir/password.txt"
 mkdir -p "$data_dir"
+printf 'zuradio-test-password\n' >"$password_file"
+chmod 0600 "$password_file"
 server_pid=
 
 cleanup() {
@@ -43,6 +46,7 @@ trap cleanup EXIT INT TERM
   --music "$music_dir" \
   --web-root "$web_root" \
   --no-open \
+  --remote-password-file "$password_file" \
   --companion-url "$companion_url" >"$server_log" 2>&1 &
 server_pid=$!
 

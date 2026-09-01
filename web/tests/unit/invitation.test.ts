@@ -3,25 +3,25 @@ import { describe, expect, it } from "vitest";
 import { parseInvitation } from "../../src/invitation";
 
 describe("companion invitation", () => {
-  it("parses a bounded listener fragment", () => {
+  it("parses a bounded password-gated listener fragment", () => {
     const invitation = parseInvitation(
-      "#v=1&role=listener&session=session&epoch=4&room=room&stream=stream&transportKey=secret",
+      "#v=2&mode=listen&session=session&epoch=4&room=room&stream=stream&transportKey=secret&passwordSalt=c2FsdA&passwordIterations=210000",
     );
     expect(invitation).toMatchObject({
-      role: "listener",
+      mode: "listen",
       session: "session",
       epoch: 4,
-      listenRoom: "room",
-      listenStream: "stream",
-      listenTransportKey: "secret",
+      controllerRoom: "room",
+      controllerStream: "stream",
+      controllerTransportKey: "secret",
+      passwordIterations: 210000,
     });
-    expect(invitation.pairingKey).toBeUndefined();
   });
 
   it("rejects an incomplete controller fragment", () => {
     expect(() =>
       parseInvitation(
-        "#v=1&role=controller&session=session&epoch=4&listenRoom=a&listenStream=b&listenTransportKey=c",
+        "#v=2&mode=control&session=session&epoch=4&passwordSalt=c2FsdA&passwordIterations=210000",
       ),
     ).toThrow(/missing room/i);
   });

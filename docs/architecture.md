@@ -17,7 +17,7 @@ flowchart LR
   Desktop["Tauri v2 shell or Linux service"] --> Core
   Core <--> Host["Loopback host bridge\nexplicit Start Broadcast"]
   Host -->|"live audio only"| VDO["VDO.Ninja WebRTC transport"]
-  Host <--> |"typed commands + state"| VDO
+  Host <--> |"typed commands · state · uploads"| VDO
   Pages["GitHub Pages\nstatic companion assets only"] --> Companion["Zuradio Web Companion"]
   Companion <--> VDO
 ```
@@ -57,6 +57,12 @@ playlist entries, favorites, play history, the active queue, shuffle/repeat
 configuration, and last-known player state. Rebuildable scanner data is kept
 separate from user-authored state.
 
+Remote uploads are transactional: the Rust daemon validates a declared batch,
+accepts ordered 8 KiB chunks into a private staging directory, verifies each
+SHA-256 digest, parses every file, and only then commits them to a managed local
+library. Embedded tags outrank folder/filename inference; persistent user
+overrides outrank both.
+
 ## Live audio bridge
 
 Local playback remains authoritative. While broadcasting, the host browser loads
@@ -69,23 +75,23 @@ the companion never receives a file URL or independent per-listener queue.
 This duplicates decoding only while broadcasting. A later native capture/Opus
 adapter can replace it without changing domain commands or remote authorization.
 
-## Pairing and roles
+## Password proof and modes
 
-Starting a broadcast creates unrelated high-entropy secrets for:
+Starting a broadcast creates unrelated high-entropy transport coordinates for:
 
-1. transport discovery;
-2. controller transport;
-3. controller application proof; and
-4. listener transport/media access.
+1. the control/data route used to authenticate all companions;
+2. the live audio route returned only after listen/control authentication; and
+3. fresh listen, control, and upload invitations bound to the current epoch.
 
-A link stores secrets in its URL fragment, which GitHub Pages never receives as
-an HTTP request target. A controller proves possession with HMAC over a
-versioned canonical transcript; Rust returns a server proof and creates a short,
-revocable grant bound to session, epoch, role, and VDO peer ID. The grant remains
-inside the trusted host bridge and every action also carries a strictly
-increasing sequence. The listener link is a separate high-entropy capability for
-a different VDO room that receives only live audio and sanitized now-playing
-events; the listener UI and transport have no mutation path.
+A link stores routing data, a random PBKDF2 salt, and its mode in the URL
+fragment, which GitHub Pages never receives as an HTTP request target. It stores
+neither the local password nor a derived key. Every companion proves the same
+local password with HMAC over a versioned transcript that includes session,
+epoch, mode, peer ID, and nonce. Rust returns a server proof and creates a
+short, revocable mode-scoped grant. Every action/upload also carries a strictly
+increasing sequence. Upload grants cannot control or listen; listener grants
+cannot inspect the library or mutate it; only listen/control receive the live
+audio route.
 
 ## Offline behavior
 

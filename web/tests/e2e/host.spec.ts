@@ -10,6 +10,7 @@ interface RuntimeFile {
 const runtimePath = process.env.ZURADIO_RUNTIME;
 if (!runtimePath) throw new Error("ZURADIO_RUNTIME must name the running daemon's runtime.json");
 const runtime = JSON.parse(fs.readFileSync(runtimePath, "utf8")) as RuntimeFile;
+const initialTrackCount = process.env.ZURADIO_FORMAT_FIXTURES === "1" ? 8 : 3;
 
 test.describe.configure({ mode: "serial" });
 
@@ -31,21 +32,37 @@ test.afterEach(() => {
 
 test("scans, searches, and browses the real local catalog", async ({ page }) => {
   await page.getByTestId("scan-library").click();
-  await expect(page.locator("[data-track-row]")).toHaveCount(3);
-  await page.getByTestId("search").fill("River");
+  await expect(page.locator("[data-track-row]")).toHaveCount(initialTrackCount);
+  await page.getByTestId("search").fill("Arpent");
   await expect(page.locator("[data-track-row]")).toHaveCount(1);
-  await expect(page.locator("[data-track-row]").getByText("02-River", { exact: true })).toBeVisible();
+  await expect(page.locator("[data-track-row]").getByText("Arpent", { exact: true })).toBeVisible();
   await page.getByTestId("search").fill("");
   await page.getByRole("button", { name: /Albums/ }).click();
   await expect(page.getByRole("heading", { name: "Albums" })).toBeVisible();
-  await page.getByRole("button", { name: "Unknown Album", exact: true }).click();
+  await page.getByRole("button", { name: "Complete Discography", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Library" })).toBeVisible();
-  await expect(page.locator("[data-track-row]")).toHaveCount(3);
+  await expect(page.locator("[data-track-row]")).toHaveCount(1);
   await page.getByRole("button", { name: /Artists/ }).click();
   await expect(page.getByRole("heading", { name: "Artists" })).toBeVisible();
-  await page.getByRole("button", { name: "Unknown Artist", exact: true }).click();
+  await page.getByRole("button", { name: "Alexander Nakarada", exact: true }).click();
   await expect(page.getByRole("heading", { name: "Library" })).toBeVisible();
-  await expect(page.locator("[data-track-row]")).toHaveCount(3);
+  await expect(page.locator("[data-track-row]")).toHaveCount(1);
+});
+
+test("edits track metadata and keeps the override after a rescan", async ({ page }) => {
+  await page.getByRole("button", { name: /Library/ }).click();
+  const row = page.locator("[data-track-row]").first();
+  const originalTitle = (await row.locator(".track-title strong").textContent()) ?? "";
+  await row.getByRole("button", { name: /Edit metadata/ }).click();
+  await page.getByRole("textbox", { name: "Title" }).fill("Browser Edited Title");
+  await page.getByTestId("save-metadata").click();
+  await expect(page.locator("[data-track-row]").first()).toContainText("Browser Edited Title");
+  await page.getByTestId("scan-library").click();
+  await expect(page.locator("[data-track-row]").first()).toContainText("Browser Edited Title");
+  await expect(page.locator(".shell")).toHaveAttribute("aria-busy", "false");
+  await page.locator("[data-track-row]").first().getByRole("button", { name: /Edit metadata/ }).click();
+  await page.getByRole("textbox", { name: "Title" }).fill(originalTitle);
+  await page.getByTestId("save-metadata").click();
 });
 
 test("creates, renames, populates, reorders, and removes a playlist", async ({ page }) => {
@@ -69,7 +86,7 @@ test("creates, renames, populates, reorders, and removes a playlist", async ({ p
   const playlistItems = page.locator(".playlist-layout section .queue-item");
   await expect(playlistItems).toHaveCount(2);
   await playlistItems.nth(1).getByRole("button", { name: "Move up" }).click();
-  await expect(playlistItems.nth(0)).toContainText("02-River");
+  await expect(playlistItems.nth(0)).toContainText("Arpent");
   await playlistItems.nth(0).getByRole("button", { name: "Remove from playlist" }).click();
   await expect(playlistItems).toHaveCount(1);
   page.once("dialog", (dialog) => dialog.accept());
@@ -114,7 +131,7 @@ test("drives playback, queue, favorite, seek, volume, shuffle, repeat, and histo
   }
 
   await rows.nth(0).getByRole("button", { name: /^Play / }).click();
-  await expect(page.getByTestId("now-title")).toHaveText("01-Sunrise");
+  await expect(page.getByTestId("now-title")).toHaveText("Nomadic Sunset");
   await expect(page.getByTestId("play-pause")).toHaveAttribute("aria-label", "Pause");
 
   await page.getByTestId("play-pause").click();
@@ -125,7 +142,7 @@ test("drives playback, queue, favorite, seek, volume, shuffle, repeat, and histo
 
   await rows.nth(0).getByRole("button", { name: "Add to favorites" }).click();
   await page.getByRole("button", { name: /Favorites/ }).click();
-  const favoriteRow = page.locator("[data-track-row]").filter({ hasText: "01-Sunrise" });
+  const favoriteRow = page.locator("[data-track-row]").filter({ hasText: "Nomadic Sunset" });
   await expect(favoriteRow).toHaveCount(1);
   if (!initiallyFavorite) {
     await favoriteRow.getByRole("button", { name: "Remove from favorites" }).click();
@@ -147,7 +164,7 @@ test("drives playback, queue, favorite, seek, volume, shuffle, repeat, and histo
 
   await page.getByTestId("seek").fill("1000");
   await page.getByRole("button", { name: "Next track" }).click();
-  await expect(page.getByTestId("now-title")).not.toHaveText("01-Sunrise");
+  await expect(page.getByTestId("now-title")).not.toHaveText("Nomadic Sunset");
   await page.getByRole("button", { name: "Previous track" }).click();
   await page.getByRole("button", { name: "Stop" }).click();
   await page.getByRole("button", { name: /History/ }).click();
@@ -187,10 +204,13 @@ test("creates role-separated broadcast invitations and revokes them", async ({ p
   await expect(page.getByTestId("stop-broadcast")).toBeVisible({ timeout: 35_000 });
   const listener = await page.getByTestId("listener-invitation").inputValue();
   const controller = await page.getByTestId("controller-invitation").inputValue();
-  expect(listener).toContain("#v=1&role=listener");
+  const upload = await page.getByTestId("upload-invitation").inputValue();
+  expect(listener).toContain("#v=2&mode=listen");
   expect(listener).not.toContain("pairingKey=");
-  expect(controller).toContain("#v=1&role=controller");
-  expect(controller).toContain("pairingKey=");
+  expect(listener).not.toContain("listenTransportKey=");
+  expect(controller).toContain("#v=2&mode=control");
+  expect(controller).not.toContain("pairingKey=");
+  expect(upload).toContain("#v=2&mode=upload");
   expect(new URL(listener).search).toBe("");
   await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: runtime.baseUrl });
   await page.getByTestId("listener-invitation").locator("..").getByRole("button", { name: "Copy" }).click();

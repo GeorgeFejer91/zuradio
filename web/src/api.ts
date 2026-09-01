@@ -108,6 +108,15 @@ export class ZuradioApi {
     return result;
   }
 
+  async remoteUpload(payload: unknown): Promise<unknown> {
+    const result = await this.request<unknown>("/api/v1/remote/upload", {
+      method: "POST",
+      body: JSON.stringify(payload),
+    });
+    await this.snapshot();
+    return result;
+  }
+
   subscribe(listener: (snapshot: AppSnapshot) => void): () => void {
     this.socket?.close();
     const scheme = location.protocol === "https:" ? "wss:" : "ws:";

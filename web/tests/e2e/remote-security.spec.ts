@@ -1,5 +1,5 @@
 import fs from "node:fs";
-import { createHmac, randomUUID } from "node:crypto";
+import { createHmac, pbkdf2Sync, randomUUID } from "node:crypto";
 
 import { expect, test, type Page } from "@playwright/test";
 
@@ -10,7 +10,8 @@ interface RuntimeFile {
 interface BroadcastSession {
   sessionId: string;
   epoch: number;
-  controllerPairingKey: string;
+  passwordSalt: string;
+  passwordIterations: number;
 }
 
 interface Snapshot {
@@ -21,6 +22,9 @@ interface Snapshot {
 const runtimePath = process.env.ZURADIO_RUNTIME;
 if (!runtimePath) throw new Error("ZURADIO_RUNTIME must name the running daemon's runtime.json");
 const runtime = JSON.parse(fs.readFileSync(runtimePath, "utf8")) as RuntimeFile;
+const passwordPath = process.env.ZURADIO_TEST_PASSWORD_FILE;
+if (!passwordPath) throw new Error("ZURADIO_TEST_PASSWORD_FILE must name the daemon password file");
+const password = fs.readFileSync(passwordPath, "utf8").replace(/[\r\n]+$/, "");
 
 test("binds controller grants to proof, broadcast, peer, and monotonic sequence", async ({ page }) => {
   await page.goto(runtime.hostUrl);
@@ -33,12 +37,13 @@ test("binds controller grants to proof, broadcast, peer, and monotonic sequence"
   try {
     const peerId = `security-test-${randomUUID()}`;
     const nonce = randomUUID();
-    const transcript = `zuradio/1|${session.sessionId}|${session.epoch}|controller|${peerId}|${nonce}`;
-    const proof = createHmac("sha256", session.controllerPairingKey).update(transcript).digest("base64url");
+    const key = pbkdf2Sync(password, Buffer.from(session.passwordSalt, "base64url"), session.passwordIterations, 32, "sha256");
+    const transcript = `zuradio/2|${session.sessionId}|${session.epoch}|control|${peerId}|${nonce}`;
+    const proof = createHmac("sha256", key).update(transcript).digest("base64url");
 
     const forged = await post(page, "/api/v1/remote/verify", {
       sessionId: session.sessionId,
-      role: "controller",
+      mode: "control",
       peerId,
       clientNonce: nonce,
       proof: "forged-proof",
@@ -47,16 +52,66 @@ test("binds controller grants to proof, broadcast, peer, and monotonic sequence"
 
     const listenerEscalation = await post(page, "/api/v1/remote/verify", {
       sessionId: session.sessionId,
-      role: "listener",
+      mode: "listen",
       peerId,
       clientNonce: nonce,
       proof,
     });
-    expect(listenerEscalation.status).toBe(403);
+    expect(listenerEscalation.status).toBe(401);
+
+    const listenerNonce = randomUUID();
+    const listenerTranscript = `zuradio/2|${session.sessionId}|${session.epoch}|listen|${peerId}|${listenerNonce}`;
+    const listenerProof = createHmac("sha256", key).update(listenerTranscript).digest("base64url");
+    const listenerGrant = await post(page, "/api/v1/remote/verify", {
+      sessionId: session.sessionId,
+      mode: "listen",
+      peerId,
+      clientNonce: listenerNonce,
+      proof: listenerProof,
+    });
+    expect(listenerGrant.status).toBe(200);
+    const listenerAction = await post(page, "/api/v1/remote/action", {
+      grantId: (listenerGrant.body as { grantId: string }).grantId,
+      peerId,
+      sequence: 1,
+      request: {
+        protocol: 1,
+        commandId: randomUUID(),
+        expectedRevision: null,
+        actor: { role: "controller", peerId },
+        action: { kind: "pause" },
+      },
+    });
+    expect(listenerAction.status).toBe(403);
+
+    const uploadNonce = randomUUID();
+    const uploadTranscript = `zuradio/2|${session.sessionId}|${session.epoch}|upload|${peerId}|${uploadNonce}`;
+    const uploadProof = createHmac("sha256", key).update(uploadTranscript).digest("base64url");
+    const uploadGrant = await post(page, "/api/v1/remote/verify", {
+      sessionId: session.sessionId,
+      mode: "upload",
+      peerId,
+      clientNonce: uploadNonce,
+      proof: uploadProof,
+    });
+    expect(uploadGrant.status).toBe(200);
+    const uploadAction = await post(page, "/api/v1/remote/action", {
+      grantId: (uploadGrant.body as { grantId: string }).grantId,
+      peerId,
+      sequence: 1,
+      request: {
+        protocol: 1,
+        commandId: randomUUID(),
+        expectedRevision: null,
+        actor: { role: "controller", peerId },
+        action: { kind: "pause" },
+      },
+    });
+    expect(uploadAction.status).toBe(403);
 
     const verified = await post(page, "/api/v1/remote/verify", {
       sessionId: session.sessionId,
-      role: "controller",
+      mode: "control",
       peerId,
       clientNonce: nonce,
       proof,

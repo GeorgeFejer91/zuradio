@@ -27,6 +27,8 @@ install -m 0755 "$project_dir/packaging/linux/zuradio-launch" "$binary_dir/zurad
 install -m 0644 "$project_dir/packaging/linux/zuradio.service" "$service_dir/zuradio.service"
 install -m 0644 "$project_dir/packaging/icons/zuradio.svg" "$icon_dir/zuradio.svg"
 mkdir -p "$install_root/web"
+find "$install_root/web" -type f -delete
+find "$install_root/web" -depth -mindepth 1 -type d -empty -delete
 cp -R "$project_dir/web/dist/." "$install_root/web/"
 
 launcher_path="$binary_dir/zuradio-launch"

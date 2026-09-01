@@ -68,6 +68,13 @@ impl Catalog {
                 available INTEGER NOT NULL,
                 file_size INTEGER NOT NULL,
                 modified_ms INTEGER NOT NULL
+                ,title_override TEXT
+                ,artist_override TEXT
+                ,album_override TEXT
+                ,album_artist_override TEXT
+                ,track_number_override INTEGER
+                ,disc_number_override INTEGER
+                ,year_override INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_tracks_artist_album
                 ON tracks(artist COLLATE NOCASE, album COLLATE NOCASE, track_number);
@@ -76,6 +83,7 @@ impl Catalog {
                 json TEXT NOT NULL
             );",
         )?;
+        ensure_override_columns(&connection)?;
         Ok(Self { connection })
     }
 
@@ -154,8 +162,15 @@ impl Catalog {
 
     pub(crate) fn tracks(&self) -> Result<Vec<Track>, CoreError> {
         let mut statement = self.connection.prepare(
-            "SELECT id, title, artist, album, album_artist, track_number, disc_number,
-                    year, duration_ms, format, available, has_artwork
+            "SELECT id,
+                    COALESCE(title_override, title),
+                    COALESCE(artist_override, artist),
+                    COALESCE(album_override, album),
+                    COALESCE(album_artist_override, album_artist),
+                    COALESCE(track_number_override, track_number),
+                    COALESCE(disc_number_override, disc_number),
+                    COALESCE(year_override, year),
+                    duration_ms, format, available, has_artwork
              FROM tracks
              ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE,
                       COALESCE(disc_number, 1), COALESCE(track_number, 0), title COLLATE NOCASE",
@@ -167,14 +182,60 @@ impl Catalog {
     pub(crate) fn track(&self, id: &str) -> Result<Option<Track>, CoreError> {
         self.connection
             .query_row(
-                "SELECT id, title, artist, album, album_artist, track_number, disc_number,
-                        year, duration_ms, format, available, has_artwork
+                "SELECT id,
+                        COALESCE(title_override, title),
+                        COALESCE(artist_override, artist),
+                        COALESCE(album_override, album),
+                        COALESCE(album_artist_override, album_artist),
+                        COALESCE(track_number_override, track_number),
+                        COALESCE(disc_number_override, disc_number),
+                        COALESCE(year_override, year),
+                        duration_ms, format, available, has_artwork
                  FROM tracks WHERE id = ?1",
                 [id],
                 track_from_row,
             )
             .optional()
             .map_err(CoreError::from)
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn update_track_metadata(
+        &mut self,
+        id: &str,
+        title: &str,
+        artist: &str,
+        album: &str,
+        album_artist: &str,
+        track_number: Option<u32>,
+        disc_number: Option<u32>,
+        year: Option<u32>,
+    ) -> Result<(), CoreError> {
+        let changed = self.connection.execute(
+            "UPDATE tracks SET
+                title_override = ?2,
+                artist_override = ?3,
+                album_override = ?4,
+                album_artist_override = ?5,
+                track_number_override = ?6,
+                disc_number_override = ?7,
+                year_override = ?8
+             WHERE id = ?1",
+            params![
+                id,
+                title,
+                artist,
+                album,
+                album_artist,
+                track_number,
+                disc_number,
+                year
+            ],
+        )?;
+        if changed == 0 {
+            return Err(CoreError::NotFound("track not found".into()));
+        }
+        Ok(())
     }
 
     pub(crate) fn track_path(&self, id: &str) -> Result<Option<PathBuf>, CoreError> {
@@ -215,6 +276,34 @@ impl Catalog {
             data: picture.data().to_vec(),
         }))
     }
+}
+
+fn ensure_override_columns(connection: &Connection) -> Result<(), CoreError> {
+    for (name, definition) in [
+        ("title_override", "TEXT"),
+        ("artist_override", "TEXT"),
+        ("album_override", "TEXT"),
+        ("album_artist_override", "TEXT"),
+        ("track_number_override", "INTEGER"),
+        ("disc_number_override", "INTEGER"),
+        ("year_override", "INTEGER"),
+    ] {
+        let exists = {
+            let mut statement = connection.prepare("PRAGMA table_info(tracks)")?;
+            statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()?
+                .iter()
+                .any(|column| column == name)
+        };
+        if !exists {
+            connection.execute(
+                &format!("ALTER TABLE tracks ADD COLUMN {name} {definition}"),
+                [],
+            )?;
+        }
+    }
+    Ok(())
 }
 
 fn track_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
@@ -271,7 +360,7 @@ pub(crate) fn scan_music(roots: &[PathBuf]) -> Result<Vec<ScannedTrack>, CoreErr
             if !canonical.starts_with(root) || !seen.insert(canonical.clone()) {
                 continue;
             }
-            if let Ok(track) = inspect_track(&canonical) {
+            if let Ok(track) = inspect_track(&canonical, root) {
                 output.push(track);
             }
         }
@@ -287,7 +376,7 @@ fn is_supported(path: &Path) -> bool {
         })
 }
 
-fn inspect_track(path: &Path) -> Result<ScannedTrack, CoreError> {
+fn inspect_track(path: &Path, root: &Path) -> Result<ScannedTrack, CoreError> {
     let metadata = fs::metadata(path).map_err(|error| CoreError::Media(error.to_string()))?;
     let modified_ms = metadata
         .modified()
@@ -296,11 +385,7 @@ fn inspect_track(path: &Path) -> Result<ScannedTrack, CoreError> {
         .map_or(0, |value| {
             i64::try_from(value.as_millis()).unwrap_or(i64::MAX)
         });
-    let fallback_title = path
-        .file_stem()
-        .and_then(|name| name.to_str())
-        .unwrap_or("Untitled")
-        .to_owned();
+    let inferred = infer_from_path(path, root);
 
     let parsed = read_from_path(path).ok();
     let tag = parsed
@@ -309,16 +394,20 @@ fn inspect_track(path: &Path) -> Result<ScannedTrack, CoreError> {
     let properties = parsed.as_ref().map(AudioFile::properties);
     let title = tag
         .and_then(Accessor::title)
-        .map_or(fallback_title, std::borrow::Cow::into_owned);
+        .filter(|value| !value.trim().is_empty())
+        .map_or(inferred.title, |value| value.trim().to_owned());
     let artist = tag
         .and_then(Accessor::artist)
-        .map_or_else(|| "Unknown Artist".to_owned(), std::borrow::Cow::into_owned);
+        .filter(|value| !value.trim().is_empty())
+        .map_or(inferred.artist, |value| value.trim().to_owned());
     let album = tag
         .and_then(Accessor::album)
-        .map_or_else(|| "Unknown Album".to_owned(), std::borrow::Cow::into_owned);
+        .filter(|value| !value.trim().is_empty())
+        .map_or(inferred.album, |value| value.trim().to_owned());
     let album_artist = tag
         .and_then(|value| value.get_string(lofty::tag::ItemKey::AlbumArtist))
-        .map_or_else(|| artist.clone(), ToOwned::to_owned);
+        .filter(|value| !value.trim().is_empty())
+        .map_or_else(|| artist.clone(), |value| value.trim().to_owned());
     let duration_ms = properties.map_or(0, |value| {
         u64::try_from(value.duration().as_millis()).unwrap_or(u64::MAX)
     });
@@ -339,11 +428,12 @@ fn inspect_track(path: &Path) -> Result<ScannedTrack, CoreError> {
             artist,
             album,
             album_artist,
-            track_number: tag.and_then(Accessor::track),
+            track_number: tag.and_then(Accessor::track).or(inferred.track_number),
             disc_number: tag.and_then(Accessor::disk),
             year: tag
                 .and_then(Accessor::date)
-                .map(|date| u32::from(date.year)),
+                .map(|date| u32::from(date.year))
+                .or(inferred.year),
             duration_ms,
             format,
             available: true,
@@ -353,6 +443,130 @@ fn inspect_track(path: &Path) -> Result<ScannedTrack, CoreError> {
         file_size: metadata.len(),
         modified_ms,
     })
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct PathMetadata {
+    title: String,
+    artist: String,
+    album: String,
+    year: Option<u32>,
+    track_number: Option<u32>,
+}
+
+fn infer_from_path(path: &Path, root: &Path) -> PathMetadata {
+    let stem = path
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("Untitled");
+    let (track_number, without_number) = strip_track_number(stem);
+    let filename_parts: Vec<_> = without_number
+        .split(" - ")
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .collect();
+    let (filename_artist, title) = if filename_parts.len() >= 2 {
+        (
+            Some(filename_parts[0].to_owned()),
+            filename_parts[1..].join(" - "),
+        )
+    } else {
+        (None, clean_filename(without_number))
+    };
+    let parents: Vec<String> = path
+        .strip_prefix(root)
+        .ok()
+        .and_then(Path::parent)
+        .map(|parent| {
+            parent
+                .components()
+                .filter_map(|component| component.as_os_str().to_str().map(ToOwned::to_owned))
+                .collect()
+        })
+        .unwrap_or_default();
+    let album_source = parents.last().map_or("", String::as_str);
+    let (album_name, year) = album_and_year(album_source);
+    let folder_artist = parents
+        .len()
+        .checked_sub(2)
+        .and_then(|index| parents.get(index))
+        .map(|value| value.trim())
+        .filter(|value| !value.is_empty());
+    PathMetadata {
+        title: nonempty_or(&title, "Untitled"),
+        artist: filename_artist
+            .as_deref()
+            .or(folder_artist)
+            .map_or_else(|| "Unknown Artist".to_owned(), ToOwned::to_owned),
+        album: nonempty_or(&album_name, "Unknown Album"),
+        year,
+        track_number,
+    }
+}
+
+fn strip_track_number(value: &str) -> (Option<u32>, &str) {
+    let digits = value.bytes().take_while(u8::is_ascii_digit).count();
+    if digits == 0 || digits > 4 {
+        return (None, value.trim());
+    }
+    let Some(number) = value
+        .get(..digits)
+        .and_then(|prefix| prefix.parse::<u32>().ok())
+    else {
+        return (None, value.trim());
+    };
+    let rest = value
+        .get(digits..)
+        .unwrap_or_default()
+        .trim_start_matches([' ', '-', '_', '.']);
+    if rest.is_empty() {
+        (None, value.trim())
+    } else {
+        (Some(number), rest.trim())
+    }
+}
+
+fn album_and_year(value: &str) -> (String, Option<u32>) {
+    let year = value
+        .split(|character: char| !character.is_ascii_digit())
+        .find_map(|part| {
+            (part.len() == 4)
+                .then(|| part.parse::<u32>().ok())
+                .flatten()
+                .filter(|candidate| (1000..=9999).contains(candidate))
+        });
+    let album = year.map_or_else(
+        || value.trim().to_owned(),
+        |candidate| {
+            value
+                .replace(&candidate.to_string(), "")
+                .trim_matches([' ', '-', '_', '.', '(', ')', '[', ']'])
+                .trim()
+                .to_owned()
+        },
+    );
+    (album, year)
+}
+
+fn clean_filename(value: &str) -> String {
+    let without_digest = value
+        .rsplit_once(" [")
+        .and_then(|(title, suffix)| {
+            suffix.strip_suffix(']').filter(|digest| {
+                digest.len() == 12 && digest.bytes().all(|byte| byte.is_ascii_hexdigit())
+            })?;
+            Some(title)
+        })
+        .unwrap_or(value);
+    without_digest.replace(['_', '.'], " ").trim().to_owned()
+}
+
+fn nonempty_or(value: &str, fallback: &str) -> String {
+    if value.trim().is_empty() {
+        fallback.to_owned()
+    } else {
+        value.trim().to_owned()
+    }
 }
 
 #[cfg(test)]
@@ -376,5 +590,61 @@ mod tests {
         assert_eq!(found.len(), 1);
         assert_eq!(found[0].track.title, "song");
         Ok(())
+    }
+
+    #[test]
+    fn infers_artist_album_year_track_and_title_from_path() {
+        let root = Path::new("/music");
+        let inferred = infer_from_path(
+            Path::new("/music/Night Signals/Glass City (2024)/03 - Neon Harbor.mp3"),
+            root,
+        );
+        assert_eq!(
+            inferred,
+            PathMetadata {
+                title: "Neon Harbor".into(),
+                artist: "Night Signals".into(),
+                album: "Glass City".into(),
+                year: Some(2024),
+                track_number: Some(3),
+            }
+        );
+    }
+
+    #[test]
+    fn filename_artist_takes_precedence_when_present() {
+        let inferred = infer_from_path(
+            Path::new("/music/Loose/07 - Paper Satellites - After Rain.ogg"),
+            Path::new("/music"),
+        );
+        assert_eq!(inferred.artist, "Paper Satellites");
+        assert_eq!(inferred.title, "After Rain");
+        assert_eq!(inferred.album, "Loose");
+    }
+
+    #[test]
+    fn hides_managed_digest_suffix_from_fallback_titles() {
+        let inferred = infer_from_path(
+            Path::new("/music/Kevin/Unknown Album/Arpent [ef06d8b524c1].mp3"),
+            Path::new("/music"),
+        );
+        assert_eq!(inferred.title, "Arpent");
+    }
+
+    #[test]
+    fn recognizes_the_complete_supported_audio_format_matrix() {
+        let expected = [
+            "aac", "aif", "aiff", "alac", "flac", "m4a", "mp3", "mp4", "ogg", "opus", "wav", "webm",
+        ];
+        assert_eq!(SUPPORTED_EXTENSIONS, expected);
+        for extension in expected {
+            assert!(is_supported(Path::new(&format!("track.{extension}"))));
+            assert!(is_supported(Path::new(&format!(
+                "TRACK.{}",
+                extension.to_ascii_uppercase()
+            ))));
+        }
+        assert!(!is_supported(Path::new("cover.jpg")));
+        assert!(!is_supported(Path::new("track.flac.exe")));
     }
 }

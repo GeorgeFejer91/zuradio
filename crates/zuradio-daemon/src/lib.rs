@@ -2,6 +2,7 @@ use std::path::PathBuf;
 
 pub mod client;
 pub mod server;
+mod upload;
 
 /// Returns the shared Zuradio data directory used by the CLI and desktop shell.
 #[must_use]
@@ -23,4 +24,19 @@ pub fn default_data_dir() -> PathBuf {
         || PathBuf::from(".zuradio"),
         |home| PathBuf::from(home).join(".local/share/zuradio"),
     )
+}
+
+/// Finds the configured remote password file without reading its contents.
+#[must_use]
+pub fn default_remote_password_file() -> Option<PathBuf> {
+    if let Some(path) = std::env::var_os("ZURADIO_REMOTE_PASSWORD_FILE") {
+        return Some(PathBuf::from(path));
+    }
+    let home = std::env::var_os("HOME").map(PathBuf::from)?;
+    [
+        home.join("Desktop/zuradio.txt"),
+        home.join("Schreibtisch/zuradio.txt"),
+    ]
+    .into_iter()
+    .find(|path| path.is_file())
 }

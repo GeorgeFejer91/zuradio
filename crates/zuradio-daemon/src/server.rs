@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::future::Future;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
+use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -23,6 +24,7 @@ use axum::routing::{get, post};
 use base64::Engine;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD;
 use hmac::{Hmac, KeyInit, Mac};
+use ring::pbkdf2;
 use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use subtle::ConstantTimeEq;
@@ -37,9 +39,11 @@ use zuradio_core::{
 };
 
 use crate::client::RuntimeFile;
+use crate::upload::{UploadError, UploadManager, UploadOperation, UploadOutcome};
 
 const MAX_BODY_BYTES: usize = 32 * 1024;
 const GRANT_TTL: Duration = Duration::from_hours(8);
+const PASSWORD_ITERATIONS: u32 = 210_000;
 
 #[derive(Debug)]
 pub struct ServeOptions {
@@ -49,9 +53,10 @@ pub struct ServeOptions {
     pub web_root: PathBuf,
     pub open_browser: bool,
     pub companion_url: String,
+    pub remote_password_file: Option<PathBuf>,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Clone)]
 struct AppState {
     core: Arc<Mutex<ZuradioCore>>,
     launch_token: Arc<str>,
@@ -61,10 +66,12 @@ struct AppState {
     companion_url: Arc<str>,
     broadcast: Arc<Mutex<Option<BroadcastSession>>>,
     grants: Arc<Mutex<HashMap<String, Grant>>>,
+    remote_password: Option<Arc<str>>,
+    uploads: Arc<Mutex<UploadManager>>,
     events: broadcast::Sender<AppSnapshot>,
 }
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 struct BroadcastSession {
     session_id: String,
@@ -75,16 +82,38 @@ struct BroadcastSession {
     controller_room: String,
     controller_stream: String,
     controller_transport_key: String,
-    controller_pairing_key: String,
+    password_salt: String,
+    password_iterations: u32,
+    #[serde(skip)]
+    password_key: [u8; 32],
     listener_invitation: String,
     controller_invitation: String,
+    upload_invitation: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RemoteMode {
+    Listen,
+    Control,
+    Upload,
+}
+
+impl RemoteMode {
+    const fn as_str(self) -> &'static str {
+        match self {
+            Self::Listen => "listen",
+            Self::Control => "control",
+            Self::Upload => "upload",
+        }
+    }
 }
 
 #[derive(Debug, Clone)]
 struct Grant {
     session_id: String,
     peer_id: String,
-    role: Role,
+    mode: RemoteMode,
     next_sequence: u64,
     expires_at: Instant,
 }
@@ -122,7 +151,7 @@ struct ScanRequest {
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct VerifyRequest {
     session_id: String,
-    role: Role,
+    mode: RemoteMode,
     peer_id: String,
     client_nonce: String,
     proof: String,
@@ -144,6 +173,22 @@ struct RemoteActionRequest {
     peer_id: String,
     sequence: u64,
     request: ActionRequest,
+}
+
+#[derive(Debug, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct RemoteUploadRequest {
+    grant_id: String,
+    peer_id: String,
+    sequence: u64,
+    operation: UploadOperation,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RemoteUploadResponse {
+    outcome: UploadOutcome,
+    snapshot: Option<AppSnapshot>,
 }
 
 #[derive(Debug)]
@@ -180,6 +225,18 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     fs::create_dir_all(&options.data_dir).context("creating Zuradio data folder")?;
+    let uploads = UploadManager::new(&options.data_dir)
+        .map_err(|error| anyhow::anyhow!("initializing upload repository: {error}"))?;
+    let library_root = uploads.library_root().to_path_buf();
+    let mut music_roots = options.music_roots;
+    if !music_roots.contains(&library_root) {
+        music_roots.push(library_root);
+    }
+    let remote_password = options
+        .remote_password_file
+        .as_deref()
+        .map(read_remote_password)
+        .transpose()?;
     let database_path = options.data_dir.join("zuradio.db");
     let core = ZuradioCore::open(&database_path).context("opening Zuradio catalog")?;
     let launch_token = random_secret();
@@ -191,10 +248,12 @@ where
         launch_token: Arc::from(launch_token.clone()),
         cli_token: Arc::from(cli_token.clone()),
         session_token: Arc::from(session_token),
-        music_roots: Arc::new(options.music_roots),
+        music_roots: Arc::new(music_roots),
         companion_url: Arc::from(options.companion_url),
         broadcast: Arc::new(Mutex::new(None)),
         grants: Arc::new(Mutex::new(HashMap::new())),
+        remote_password: remote_password.map(Arc::from),
+        uploads: Arc::new(Mutex::new(uploads)),
         events,
     };
 
@@ -217,6 +276,7 @@ where
         .route("/api/v1/broadcast/stop", post(stop_broadcast))
         .route("/api/v1/remote/verify", post(remote_verify))
         .route("/api/v1/remote/action", post(remote_action))
+        .route("/api/v1/remote/upload", post(remote_upload))
         .fallback_service(ServeDir::new(web_root).append_index_html_on_directories(true))
         .layer(DefaultBodyLimit::max(MAX_BODY_BYTES))
         .layer(middleware::from_fn(security_headers))
@@ -503,6 +563,14 @@ async fn start_broadcast(
 ) -> ApiResult<Json<BroadcastSession>> {
     authorize_local(&headers, &state)?;
     validate_origin(&headers)?;
+    let password = state.remote_password.as_deref().ok_or_else(|| {
+        wire_error(
+            StatusCode::PRECONDITION_FAILED,
+            ErrorCode::Forbidden,
+            "remote password file is not configured",
+            None,
+        )
+    })?;
     let session_id = random_id();
     let epoch = random_epoch();
     let listen_room = random_id();
@@ -511,13 +579,19 @@ async fn start_broadcast(
     let controller_room = random_id();
     let controller_stream = random_id();
     let controller_transport_key = random_secret();
-    let controller_pairing_key = random_secret();
+    let password_salt_bytes = rand::random::<[u8; 24]>();
+    let password_salt = URL_SAFE_NO_PAD.encode(password_salt_bytes);
+    let password_iterations = PASSWORD_ITERATIONS;
+    let password_key = derive_password_key(password.as_bytes(), &password_salt_bytes)?;
     let base = state.companion_url.trim_end_matches('/');
     let listener_invitation = format!(
-        "{base}/companion/#v=1&role=listener&session={session_id}&epoch={epoch}&room={listen_room}&stream={listen_stream}&transportKey={listen_transport_key}"
+        "{base}/companion/#v=2&mode=listen&session={session_id}&epoch={epoch}&room={controller_room}&stream={controller_stream}&transportKey={controller_transport_key}&passwordSalt={password_salt}&passwordIterations={password_iterations}"
     );
     let controller_invitation = format!(
-        "{base}/companion/#v=1&role=controller&session={session_id}&epoch={epoch}&listenRoom={listen_room}&listenStream={listen_stream}&listenTransportKey={listen_transport_key}&room={controller_room}&stream={controller_stream}&transportKey={controller_transport_key}&pairingKey={controller_pairing_key}"
+        "{base}/companion/#v=2&mode=control&session={session_id}&epoch={epoch}&room={controller_room}&stream={controller_stream}&transportKey={controller_transport_key}&passwordSalt={password_salt}&passwordIterations={password_iterations}"
+    );
+    let upload_invitation = format!(
+        "{base}/companion/#v=2&mode=upload&session={session_id}&epoch={epoch}&room={controller_room}&stream={controller_stream}&transportKey={controller_transport_key}&passwordSalt={password_salt}&passwordIterations={password_iterations}"
     );
     let session = BroadcastSession {
         session_id,
@@ -528,12 +602,16 @@ async fn start_broadcast(
         controller_room,
         controller_stream,
         controller_transport_key,
-        controller_pairing_key,
+        password_salt,
+        password_iterations,
+        password_key,
         listener_invitation,
         controller_invitation,
+        upload_invitation,
     };
     *lock(&state.broadcast)? = Some(session.clone());
     lock(&state.grants)?.clear();
+    lock(&state.uploads)?.revoke_all();
     Ok(Json(session))
 }
 
@@ -545,6 +623,7 @@ async fn stop_broadcast(
     validate_origin(&headers)?;
     *lock(&state.broadcast)? = None;
     lock(&state.grants)?.clear();
+    lock(&state.uploads)?.revoke_all();
     Ok(StatusCode::NO_CONTENT)
 }
 
@@ -554,6 +633,7 @@ async fn remote_verify(
     Json(request): Json<VerifyRequest>,
 ) -> ApiResult<Json<VerifyResponse>> {
     authorize_local(&headers, &state)?;
+    validate_origin(&headers)?;
     validate_bounded(&request.peer_id, 128, "peer ID")?;
     validate_bounded(&request.client_nonce, 128, "nonce")?;
     let session = lock(&state.broadcast)?.clone().ok_or_else(|| {
@@ -564,19 +644,23 @@ async fn remote_verify(
             None,
         )
     })?;
-    if request.session_id != session.session_id || request.role != Role::Controller {
+    if request.session_id != session.session_id {
         return Err(wire_error(
             StatusCode::FORBIDDEN,
             ErrorCode::Forbidden,
-            "role or session is not authorized",
+            "session is not authorized",
             None,
         ));
     }
     let transcript = format!(
-        "zuradio/1|{}|{}|controller|{}|{}",
-        session.session_id, session.epoch, request.peer_id, request.client_nonce
+        "zuradio/2|{}|{}|{}|{}|{}",
+        session.session_id,
+        session.epoch,
+        request.mode.as_str(),
+        request.peer_id,
+        request.client_nonce
     );
-    let expected = hmac_bytes(&session.controller_pairing_key, transcript.as_bytes())?;
+    let expected = hmac_bytes(&session.password_key, transcript.as_bytes())?;
     let received = URL_SAFE_NO_PAD
         .decode(request.proof.as_bytes())
         .map_err(|_| {
@@ -601,25 +685,31 @@ async fn remote_verify(
         Grant {
             session_id: session.session_id,
             peer_id: request.peer_id,
-            role: Role::Controller,
+            mode: request.mode,
             next_sequence: 1,
             expires_at: Instant::now() + GRANT_TTL,
         },
     );
     let server_proof = URL_SAFE_NO_PAD.encode(hmac_bytes(
-        &session.controller_pairing_key,
+        &session.password_key,
         format!("{transcript}|accepted").as_bytes(),
     )?);
-    Ok(Json(VerifyResponse {
-        grant_id,
-        server_proof,
-        expires_in_seconds: GRANT_TTL.as_secs(),
-        scopes: vec![
+    let scopes = match request.mode {
+        RemoteMode::Listen => vec!["stream:listen", "now-playing:read"],
+        RemoteMode::Control => vec![
+            "stream:listen",
             "state:read",
             "player:control",
             "queue:write",
             "playlists:write",
         ],
+        RemoteMode::Upload => vec!["library:upload", "library:read"],
+    };
+    Ok(Json(VerifyResponse {
+        grant_id,
+        server_proof,
+        expires_in_seconds: GRANT_TTL.as_secs(),
+        scopes,
     }))
 }
 
@@ -629,36 +719,16 @@ async fn remote_action(
     Json(mut remote): Json<RemoteActionRequest>,
 ) -> ApiResult<Json<ActionResult>> {
     authorize_local(&headers, &state)?;
-    let role = {
-        let mut grants = lock(&state.grants)?;
-        grants.retain(|_, grant| grant.expires_at > Instant::now());
-        let grant = grants.get_mut(&remote.grant_id).ok_or_else(|| {
-            wire_error(
-                StatusCode::UNAUTHORIZED,
-                ErrorCode::Forbidden,
-                "grant expired",
-                None,
-            )
-        })?;
-        let active_session = lock(&state.broadcast)?
-            .as_ref()
-            .map(|session| session.session_id.clone());
-        if grant.session_id != active_session.unwrap_or_default()
-            || grant.peer_id != remote.peer_id
-            || remote.sequence != grant.next_sequence
-        {
-            return Err(wire_error(
-                StatusCode::FORBIDDEN,
-                ErrorCode::Forbidden,
-                "grant binding or sequence is invalid",
-                None,
-            ));
-        }
-        grant.next_sequence = grant.next_sequence.saturating_add(1);
-        grant.role
-    };
+    validate_origin(&headers)?;
+    authorize_remote_grant(
+        &state,
+        &remote.grant_id,
+        &remote.peer_id,
+        remote.sequence,
+        RemoteMode::Control,
+    )?;
     remote.request.actor = Actor {
-        role,
+        role: Role::Controller,
         peer_id: Some(remote.peer_id),
     };
     let result = core(&state)?
@@ -666,6 +736,58 @@ async fn remote_action(
         .map_err(|error| map_core_error(&error))?;
     publish_snapshot(&state)?;
     Ok(Json(result))
+}
+
+async fn remote_upload(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(remote): Json<RemoteUploadRequest>,
+) -> ApiResult<Json<RemoteUploadResponse>> {
+    authorize_local(&headers, &state)?;
+    validate_origin(&headers)?;
+    authorize_remote_grant(
+        &state,
+        &remote.grant_id,
+        &remote.peer_id,
+        remote.sequence,
+        RemoteMode::Upload,
+    )?;
+    let is_commit = matches!(&remote.operation, UploadOperation::Commit { .. });
+    let uploads = Arc::clone(&state.uploads);
+    let operation = remote.operation;
+    let outcome = tokio::task::spawn_blocking(move || {
+        uploads
+            .lock()
+            .map_err(|_| UploadError::Storage)?
+            .execute(operation)
+    })
+    .await
+    .map_err(|_| upload_worker_error())?
+    .map_err(|error| map_upload_error(&error))?;
+
+    let snapshot = if is_commit {
+        let core_state = Arc::clone(&state.core);
+        let roots = state.music_roots.as_ref().clone();
+        let scanned = tokio::task::spawn_blocking(move || {
+            core_state
+                .lock()
+                .map_err(|_| BlockingScanError::Lock)?
+                .scan(&roots)
+                .map_err(BlockingScanError::Core)
+        })
+        .await
+        .map_err(|_| upload_worker_error())?;
+        let snapshot = match scanned {
+            Ok(value) => value,
+            Err(BlockingScanError::Core(error)) => return Err(map_core_error(&error)),
+            Err(BlockingScanError::Lock) => return Err(upload_worker_error()),
+        };
+        let _ = state.events.send(snapshot.clone());
+        Some(snapshot)
+    } else {
+        None
+    };
+    Ok(Json(RemoteUploadResponse { outcome, snapshot }))
 }
 
 async fn validate_host(request: Request, next: Next) -> Response {
@@ -797,6 +919,43 @@ fn publish_snapshot(state: &AppState) -> ApiResult<()> {
     Ok(())
 }
 
+fn authorize_remote_grant(
+    state: &AppState,
+    grant_id: &str,
+    peer_id: &str,
+    sequence: u64,
+    required_mode: RemoteMode,
+) -> ApiResult<()> {
+    let active_session = lock(&state.broadcast)?
+        .as_ref()
+        .map(|session| session.session_id.clone())
+        .unwrap_or_default();
+    let mut grants = lock(&state.grants)?;
+    grants.retain(|_, grant| grant.expires_at > Instant::now());
+    let grant = grants.get_mut(grant_id).ok_or_else(|| {
+        wire_error(
+            StatusCode::UNAUTHORIZED,
+            ErrorCode::Forbidden,
+            "grant expired",
+            None,
+        )
+    })?;
+    if grant.session_id != active_session
+        || grant.peer_id != peer_id
+        || grant.mode != required_mode
+        || sequence != grant.next_sequence
+    {
+        return Err(wire_error(
+            StatusCode::FORBIDDEN,
+            ErrorCode::Forbidden,
+            "grant scope, binding, or sequence is invalid",
+            None,
+        ));
+    }
+    grant.next_sequence = grant.next_sequence.saturating_add(1);
+    Ok(())
+}
+
 fn core(state: &AppState) -> ApiResult<MutexGuard<'_, ZuradioCore>> {
     lock(&state.core)
 }
@@ -821,6 +980,29 @@ fn map_core_error(error: &CoreError) -> (StatusCode, Json<WireError>) {
         ErrorCode::Storage | ErrorCode::Media => StatusCode::INTERNAL_SERVER_ERROR,
     };
     wire_error(status, error.code(), &error.to_string(), None)
+}
+
+fn map_upload_error(error: &UploadError) -> (StatusCode, Json<WireError>) {
+    let (status, code) = match error {
+        UploadError::Invalid => (StatusCode::BAD_REQUEST, ErrorCode::InvalidInput),
+        UploadError::NotFound => (StatusCode::NOT_FOUND, ErrorCode::NotFound),
+        UploadError::TooLarge => (StatusCode::PAYLOAD_TOO_LARGE, ErrorCode::InvalidInput),
+        UploadError::Unsupported => (StatusCode::UNSUPPORTED_MEDIA_TYPE, ErrorCode::InvalidInput),
+        UploadError::Integrity | UploadError::Media => {
+            (StatusCode::UNPROCESSABLE_ENTITY, ErrorCode::Media)
+        }
+        UploadError::Storage => (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Storage),
+    };
+    wire_error(status, code, &error.to_string(), None)
+}
+
+fn upload_worker_error() -> (StatusCode, Json<WireError>) {
+    wire_error(
+        StatusCode::INTERNAL_SERVER_ERROR,
+        ErrorCode::Storage,
+        "upload worker stopped unexpectedly",
+        None,
+    )
 }
 
 fn wire_error(
@@ -852,8 +1034,8 @@ fn validate_bounded(value: &str, max: usize, label: &str) -> ApiResult<()> {
     }
 }
 
-fn hmac_bytes(key: &str, data: &[u8]) -> ApiResult<Vec<u8>> {
-    let mut mac = Hmac::<Sha256>::new_from_slice(key.as_bytes()).map_err(|_| {
+fn hmac_bytes(key: &[u8], data: &[u8]) -> ApiResult<Vec<u8>> {
+    let mut mac = Hmac::<Sha256>::new_from_slice(key).map_err(|_| {
         wire_error(
             StatusCode::INTERNAL_SERVER_ERROR,
             ErrorCode::Storage,
@@ -863,6 +1045,46 @@ fn hmac_bytes(key: &str, data: &[u8]) -> ApiResult<Vec<u8>> {
     })?;
     mac.update(data);
     Ok(mac.finalize().into_bytes().to_vec())
+}
+
+fn derive_password_key(password: &[u8], salt: &[u8]) -> ApiResult<[u8; 32]> {
+    let iterations = NonZeroU32::new(PASSWORD_ITERATIONS).ok_or_else(|| {
+        wire_error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            ErrorCode::Storage,
+            "authentication setup failed",
+            None,
+        )
+    })?;
+    let mut key = [0_u8; 32];
+    pbkdf2::derive(
+        pbkdf2::PBKDF2_HMAC_SHA256,
+        iterations,
+        salt,
+        password,
+        &mut key,
+    );
+    Ok(key)
+}
+
+fn read_remote_password(path: &Path) -> anyhow::Result<String> {
+    let bytes = fs::read(path).with_context(|| "reading remote password file")?;
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let mode = fs::metadata(path)?.permissions().mode();
+        anyhow::ensure!(
+            mode.trailing_zeros() >= 6,
+            "remote password file must not be readable by group or other users"
+        );
+    }
+    let password = String::from_utf8(bytes).context("remote password file is not UTF-8")?;
+    let password = password.trim_end_matches(['\r', '\n']).to_owned();
+    anyhow::ensure!(
+        (8..=256).contains(&password.len()),
+        "remote password must contain 8 to 256 bytes"
+    );
+    Ok(password)
 }
 
 fn random_secret() -> String {

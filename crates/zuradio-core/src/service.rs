@@ -139,7 +139,12 @@ impl ZuradioCore {
     }
 
     fn apply(&mut self, action: Action, role: Role) -> Result<(), CoreError> {
-        if role == Role::Controller && matches!(action, Action::ReportPlayback { .. }) {
+        if role == Role::Controller
+            && matches!(
+                action,
+                Action::ReportPlayback { .. } | Action::EditTrackMetadata { .. }
+            )
+        {
             return Err(CoreError::Forbidden);
         }
         match action {
@@ -176,6 +181,39 @@ impl ZuradioCore {
                 to,
             } => self.playlist_move(&playlist_id, from, to)?,
             Action::FavoriteSet { track_id, favorite } => self.favorite_set(&track_id, favorite)?,
+            Action::EditTrackMetadata {
+                track_id,
+                title,
+                artist,
+                album,
+                album_artist,
+                track_number,
+                disc_number,
+                year,
+            } => {
+                self.ensure_track(&track_id)?;
+                let fields = [&title, &artist, &album, &album_artist];
+                if fields.iter().any(|value| {
+                    value.trim().is_empty()
+                        || value.chars().count() > 160
+                        || value.chars().any(char::is_control)
+                }) || track_number.is_some_and(|value| value == 0 || value > 9_999)
+                    || disc_number.is_some_and(|value| value == 0 || value > 999)
+                    || year.is_some_and(|value| !(1000..=9999).contains(&value))
+                {
+                    return Err(CoreError::InvalidInput("invalid track metadata".into()));
+                }
+                self.catalog.update_track_metadata(
+                    &track_id,
+                    title.trim(),
+                    artist.trim(),
+                    album.trim(),
+                    album_artist.trim(),
+                    track_number,
+                    disc_number,
+                    year,
+                )?;
+            }
             Action::ReportPlayback {
                 status,
                 position_ms,
@@ -570,6 +608,10 @@ fn now_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
+    use std::fs;
+
+    use tempfile::tempdir;
+
     use super::*;
     use crate::Actor;
 
@@ -660,6 +702,37 @@ mod tests {
         expected.push("fourth".into());
         assert_eq!(core.state.player.queue, expected);
         assert_eq!(core.state.player.queue_before_shuffle, None);
+        Ok(())
+    }
+
+    #[test]
+    fn metadata_edits_survive_rescans() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempdir()?;
+        let album = directory.path().join("Source Artist/Source Album (2022)");
+        fs::create_dir_all(&album)?;
+        fs::write(album.join("01 - Source Title.mp3"), b"fixture")?;
+        let mut core = ZuradioCore::in_memory()?;
+        let scanned = core.scan(&[directory.path().to_path_buf()])?;
+        let track = scanned.tracks.first().ok_or("track missing")?;
+        core.execute(request(
+            scanned.revision,
+            Action::EditTrackMetadata {
+                track_id: track.id.clone(),
+                title: "Edited Title".into(),
+                artist: "Edited Artist".into(),
+                album: "Edited Album".into(),
+                album_artist: "Edited Album Artist".into(),
+                track_number: Some(9),
+                disc_number: Some(2),
+                year: Some(2030),
+            },
+        ))?;
+        let rescanned = core.scan(&[directory.path().to_path_buf()])?;
+        let edited = rescanned.tracks.first().ok_or("track missing")?;
+        assert_eq!(edited.title, "Edited Title");
+        assert_eq!(edited.artist, "Edited Artist");
+        assert_eq!(edited.album, "Edited Album");
+        assert_eq!(edited.year, Some(2030));
         Ok(())
     }
 }

@@ -6,7 +6,8 @@ Status: MVP security contract, 2026-09-01.
 
 - Local file paths, tags, cover art, catalog membership, and listening history.
 - The live audio stream and current player state.
-- Controller and listener access keys.
+- The central remote password, password proofs, transport coordinates, and
+  listen/control/upload grants.
 - Playback, queue, playlist, volume, scanning, and broadcast authority.
 
 ## Untrusted components
@@ -27,15 +28,21 @@ but does not receive arbitrary filesystem or process authority.
   the fragment.
 - Enforce exact origin and host checks, small body limits, rate/concurrency
   limits, content types, and response security headers.
-- Generate broadcast credentials from operating-system randomness, keep them
-  memory-only, and discard them on Stop or process exit. Compare controller
-  proofs in constant time. Keep role, scope, expiry, peer binding, broadcast
-  epoch, and replay sequence in Rust.
+- Read the password only from a private local file, reject group/other-readable
+  Unix permissions, and never return, log, persist in the database, or include
+  it in invitations. Derive a per-invitation key with PBKDF2 and compare mutual
+  HMAC proofs in constant time.
+- Generate broadcast routing credentials from operating-system randomness, keep
+  them memory-only, and discard them on Stop or process exit. Keep mode, scope,
+  expiry, peer binding, broadcast epoch, and replay sequence in Rust.
 - Keep transport, controller, listener, and media secrets independent. Rotating
   or stopping a broadcast revokes its complete epoch.
 - Validate one versioned JSON schema. Reject unknown actions and unknown fields.
 - Resolve media IDs through the catalog. Never accept a remote path. Canonicalize
   scan roots, reject escapes and special files, and handle symlinks explicitly.
+- Stage uploads beneath the private data directory; constrain count, per-file
+  and batch sizes; require ordered chunks and SHA-256; parse every file before
+  committing the batch; and discard partial transfers on abort/Stop/restart.
 - Expose no shell, process, arbitrary path, URL, SQL, or generic command adapter.
   Remote peers can submit only the closed Rust action schema.
 - Require an explicit local gesture to start broadcasting. Stop media tracks,
@@ -64,8 +71,11 @@ protocol. Direct Internet exposure of the loopback daemon is out of scope.
 
 - Loopback host/origin and unauthenticated API rejection.
 - Local bootstrap fragment removal and 0600 runtime credential storage.
-- Controller HMAC and server-proof verification, role denial, peer/session
-  binding, monotonic replay rejection, and broadcast Stop revocation.
+- Single-password PBKDF2/HMAC and server-proof verification, mode denial,
+  peer/session binding, monotonic replay rejection, and broadcast Stop revocation.
+- Password-gated folder/file upload, wrong-password rejection before audio or
+  authority exposure, digest/offset/path validation, managed repository commit,
+  metadata inference, and persistent local metadata correction.
 - Real VDO.Ninja audio/data transport between independent host, listener, and
   controller Chromium contexts.
 - Listener UI immutability and controller player/queue/playlist behavior.
@@ -84,5 +94,7 @@ protocol. Direct Internet exposure of the loopback daemon is out of scope.
   host-native CI compile matrix.
 - TURN trust, availability, bandwidth, and abuse limits.
 - Forced-TURN, physical-phone, multi-listener, and long-duration endurance.
-- Password-authenticated key exchange for memorable human passphrases.
+- A true password-authenticated key exchange (PAKE) to remove the offline
+  dictionary-guessing risk for weak human passwords; current deployments should
+  use a long unique random password.
 - Native code signing/notarization, auto-update, and supply-chain attestations.

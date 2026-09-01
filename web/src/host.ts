@@ -16,6 +16,7 @@ let snapshot: AppSnapshot | null = null;
 let view: View = "library";
 let search = "";
 let selectedPlaylistId: string | null = null;
+let editingTrackId: string | null = null;
 let broadcastSession: BroadcastSession | null = null;
 let busy = false;
 let message: { text: string; error: boolean } | null = null;
@@ -53,6 +54,12 @@ const bridge = new HostBroadcastBridge({
     }
     return result;
   },
+  upload: async (payload) => {
+    const result = await api.remoteUpload(payload);
+    snapshot = api.currentSnapshot;
+    render();
+    return result;
+  },
   onError: (reason) => showMessage(reason, true),
 });
 
@@ -64,8 +71,12 @@ root.addEventListener("click", (event) => {
 
 root.addEventListener("submit", (event) => {
   const form = event.target as HTMLFormElement;
-  if (!form.matches("[data-playlist-form]")) return;
   event.preventDefault();
+  if (form.matches("[data-metadata-form]")) {
+    void saveMetadata(form);
+    return;
+  }
+  if (!form.matches("[data-playlist-form]")) return;
   const input = form.elements.namedItem("playlistName") as HTMLInputElement;
   const name = input.value.trim();
   if (name) void createPlaylist(name);
@@ -164,6 +175,16 @@ async function handleClick(target: HTMLElement): Promise<void> {
     }
     return;
   }
+  if (action === "edit-track") {
+    editingTrackId = target.dataset.trackId ?? null;
+    render();
+    return;
+  }
+  if (action === "close-metadata") {
+    editingTrackId = null;
+    render();
+    return;
+  }
   if (action === "start-broadcast") {
     await task(async () => {
       await audio.unlock();
@@ -257,6 +278,29 @@ async function handleClick(target: HTMLElement): Promise<void> {
   }
 }
 
+async function saveMetadata(form: HTMLFormElement): Promise<void> {
+  const track = snapshot?.tracks.find((candidate) => candidate.id === editingTrackId);
+  if (!track) return;
+  const data = new FormData(form);
+  const optionalNumber = (name: string): number | null => {
+    const value = String(data.get(name) ?? "").trim();
+    return value ? Number(value) : null;
+  };
+  await perform({
+    kind: "edit_track_metadata",
+    trackId: track.id,
+    title: String(data.get("title") ?? ""),
+    artist: String(data.get("artist") ?? ""),
+    album: String(data.get("album") ?? ""),
+    albumArtist: String(data.get("albumArtist") ?? ""),
+    trackNumber: optionalNumber("trackNumber"),
+    discNumber: optionalNumber("discNumber"),
+    year: optionalNumber("year"),
+  });
+  editingTrackId = null;
+  render();
+}
+
 async function perform(action: Action, unlock = true): Promise<void> {
   await task(async () => {
     if (unlock && (action.kind === "play" || action.kind === "play_track")) await audio.unlock();
@@ -317,6 +361,7 @@ function render(): void {
       ${renderQueue(snapshot)}
     </div>
     ${renderPlayer(snapshot)}
+    ${editingTrackId ? renderMetadataEditor(snapshot) : ""}
     <div class="status-line${message?.error ? " error" : ""}" role="status" aria-live="polite" ${message ? "" : "hidden"}>${escapeHtml(message?.text ?? "")}</div>
   `;
   updateProgress();
@@ -387,8 +432,31 @@ function renderTrack(track: Track, state: AppSnapshot): string {
       <button data-action="favorite" data-track-id="${escapeAttribute(track.id)}" data-enabled="${!favorite}" aria-label="${favorite ? "Remove from" : "Add to"} favorites" title="Favorite">${favorite ? "★" : "☆"}</button>
       <button data-action="queue-add" data-track-id="${escapeAttribute(track.id)}" aria-label="Add ${escapeAttribute(track.title)} to queue" title="Add to queue">＋</button>
       ${playlist ? `<button data-action="playlist-add" data-playlist-id="${escapeAttribute(playlist.id)}" data-track-id="${escapeAttribute(track.id)}" aria-label="Add to ${escapeAttribute(playlist.name)}" title="Add to ${escapeAttribute(playlist.name)}">↳</button>` : ""}
+      <button data-action="edit-track" data-track-id="${escapeAttribute(track.id)}" aria-label="Edit metadata for ${escapeAttribute(track.title)}" title="Edit metadata">✎</button>
     </div>
   </li>`;
+}
+
+function renderMetadataEditor(state: AppSnapshot): string {
+  const track = state.tracks.find((candidate) => candidate.id === editingTrackId);
+  if (!track) return "";
+  return `<div class="metadata-backdrop">
+    <section class="metadata-editor" role="dialog" aria-modal="true" aria-labelledby="metadata-title" data-metadata-dialog>
+      <div class="section-header"><div><h2 id="metadata-title">Edit track details</h2><p class="muted">Overrides stay in Zuradio and survive future library scans.</p></div><button type="button" data-action="close-metadata" aria-label="Close">×</button></div>
+      <form data-metadata-form>
+        <label>Title<input name="title" required maxlength="160" value="${escapeAttribute(track.title)}" /></label>
+        <label>Artist<input name="artist" required maxlength="160" value="${escapeAttribute(track.artist)}" /></label>
+        <label>Album<input name="album" required maxlength="160" value="${escapeAttribute(track.album)}" /></label>
+        <label>Album artist<input name="albumArtist" required maxlength="160" value="${escapeAttribute(track.albumArtist)}" /></label>
+        <div class="metadata-numbers">
+          <label>Track<input name="trackNumber" type="number" min="1" max="9999" value="${track.trackNumber ?? ""}" /></label>
+          <label>Disc<input name="discNumber" type="number" min="1" max="999" value="${track.discNumber ?? ""}" /></label>
+          <label>Year<input name="year" type="number" min="1000" max="9999" value="${track.year ?? ""}" /></label>
+        </div>
+        <div class="metadata-actions"><button type="button" data-action="close-metadata">Cancel</button><button class="primary" data-testid="save-metadata">Save changes</button></div>
+      </form>
+    </section>
+  </div>`;
 }
 
 function renderGroups(title: string, groups: Map<string, Track[]>): string {
@@ -457,16 +525,17 @@ function renderBroadcast(): string {
     return `<section class="broadcast-panel">
       <h2>Broadcast</h2>
       <div class="broadcast-status"><strong>Off</strong><p class="muted">No remote peer can hear or control this laptop.</p></div>
-      <p>Starting a broadcast creates fresh listener and controller invitations. Music stays on this laptop; the companion receives only a live WebRTC signal.</p>
+      <p>Starting a broadcast creates fresh password-gated listen, control, and upload invitations. Music stays on this laptop; the companion receives live audio or sends files directly to this app.</p>
       <button class="primary" data-action="start-broadcast" data-testid="start-broadcast" ${disabled()}>Start broadcast</button>
     </section>`;
   }
   return `<section class="broadcast-panel">
     <h2>Broadcast</h2>
-    <div class="broadcast-status live"><strong>Live</strong><p class="muted">Audio originates from this player. Stopping revokes both invitations.</p></div>
+    <div class="broadcast-status live"><strong>Live</strong><p class="muted">Audio originates from this player. Stopping revokes every invitation and partial upload.</p></div>
     <button class="danger" data-action="stop-broadcast" data-testid="stop-broadcast" ${disabled()}>Stop broadcast</button>
     ${renderInvitation("Listener invitation", "Listen only; no player or playlist controls.", broadcastSession.listenerInvitation, "listener-invitation")}
     ${renderInvitation("Controller invitation", "Can listen and use the typed player, queue, and playlist controls.", broadcastSession.controllerInvitation, "controller-invitation")}
+    ${renderInvitation("Upload invitation", "Can select files or a folder and add supported music to this laptop.", broadcastSession.uploadInvitation, "upload-invitation")}
   </section>`;
 }
 

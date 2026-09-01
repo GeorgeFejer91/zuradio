@@ -32,13 +32,14 @@ and reported success.
 
 ### Rust
 
-- `cargo test --workspace`: 11 Rust domain, daemon, CLI, and Tauri shell tests
-  passed, 0 failed.
+- `cargo test --workspace --exclude zuradio-desktop`: 19 Rust domain, daemon,
+  and CLI tests passed, 0 failed (10 core, 8 daemon, 1 CLI).
 - `cargo clippy --workspace --all-targets -- -D warnings`: passed.
 - Core coverage includes stale-revision rejection, listener mutation denial,
   command-ID deduplication, playlist creation/rename, queue shuffle restoration,
-  symlink refusal, JavaScript-safe broadcast epochs, explicit CLI boolean
-  parsing, and single-Range parsing.
+  symlink refusal, all 12 accepted audio extensions, upload path/offset/size and
+  digest rejection, metadata inference, JavaScript-safe broadcast epochs,
+  explicit CLI boolean parsing, and single-Range parsing.
 - Optimized `zuradio-daemon` release build: passed.
 
 ### Native desktop shell
@@ -71,7 +72,7 @@ create/list/add/move/remove/rename/delete. Final canonical state was checked wit
 
 - Node.js 22.23.2 / npm 10.9.8.
 - TypeScript `tsc --noEmit`: passed.
-- Vitest 3.2.7 invitation/parser suite: 3 passed, 0 failed.
+- Vitest 3.2.7 invitation/parser and browser format suites: 5 passed, 0 failed.
 - Vite 7.3.6 production host build: passed.
 - `npm audit`: 0 vulnerabilities after upgrading Vite, Vitest, and Playwright.
 - `npm audit --omit=dev`: 0 production vulnerabilities.
@@ -79,7 +80,7 @@ create/list/add/move/remove/rename/delete. Final canonical state was checked wit
 
 ### Live browser UI
 
-Playwright 1.62.1 with Chromium 151 ran ten tests with one worker. The complete
+Playwright 1.62.1 with Chromium 151 ran 15 tests with one worker. The complete
 matrix passed first against the development release build and then again against
 the binary and web files installed under `~/.local` using an isolated database:
 
@@ -91,28 +92,44 @@ the binary and web files installed under `~/.local` using an isolated database:
 4. Play, pause, resume, stop, next, previous, seek, volume, mute, favorite,
    history, shuffle, order restoration, and repeat modes.
 5. Queue add, move, remove, and clear.
-6. Separate controller/listener invitation creation, clipboard copy, and Stop
+6. Separate listen/control/upload invitation creation, clipboard copy, and Stop
    revocation.
 7. Keyboard reachability and 390 × 844 responsive layout.
 8. Loopback health and unauthenticated snapshot rejection.
 9. Safe no-invitation/offline landing behavior and editable malformed-link
    validation.
-10. Forged-proof rejection, listener escalation denial, actor overwrite, valid
-   controller acceptance, peer binding, replay rejection, and grant revocation.
+10. Forged-proof rejection, mode-transcript mismatch, listener/uploader
+    escalation denial, actor overwrite, valid controller acceptance, peer
+    binding, replay rejection, and grant revocation.
+11. Wrong-password rejection before an audio track or authority is exposed.
+12. Authenticated single-file upload, SHA-256 verification, embedded-tag
+    cataloging, managed-repository visibility, and a 32 KiB/s minimum.
+13. Browser folder selection, non-audio filtering, sequential three-file upload,
+    and three imported catalog records.
+14. Local metadata editing followed by rescan and second edit, proving override
+    persistence and reusable UI state.
+15. Generated, valid WAV, FLAC, AIFF, MP3, and OGG files: all five were parsed
+    with approximately one-second durations; Chromium decoded WAV and FLAC.
 
 Page and console error collectors were empty in the passing live-stream run.
 Phone-width screenshots were visually inspected for the host, controller, and
 listener layouts.
 
 The final installed-byte rerun used the installed optimized daemon and web
-assets with a disposable database and the public Pages companion. All 10 tests
-passed in 30.9 seconds. The first harness attempt correctly exposed missing
-fixture pre-scan and preview-server setup; after those test prerequisites were
-made explicit, the complete matrix passed without a product-code change.
+assets with a disposable database and the same static companion bundle that is
+published to Pages. Its temporary database, generated format files, staged
+uploads, and copied password were removed automatically.
+
+The repeatable installed-byte 60-track performance job completed five scans at
+a 55 ms average, returned an authenticated snapshot in 27 ms, served media at
+28,732,439 bytes/s, and held the daemon at 10,652 KiB resident memory. A real 6.49 MB WebRTC upload
+completed in about 26 seconds, and a three-file 16.2 MB folder upload completed
+in about 54–57 seconds through the public VDO.Ninja path.
 
 ## Static companion boundary
 
-`npm run build:pages` produced a 180 KiB `web/dist-pages` artifact containing
+`npm run build:pages` produced an approximately 168 KiB `web/dist-pages`
+artifact containing
 only:
 
 - `index.html`;
@@ -143,6 +160,9 @@ Zuradio and Deploy Zuradio Web Companion GitHub Actions workflows.
   verification is now required.
 - The companion could display “Controller connected” before receiving the
   mutually authenticated initial snapshot; success now waits for both.
+- A data-channel-open event could precede actual writability, causing Zuradio to
+  discard the one password hello and time out. The proof key is now retained
+  until a successful send and the hello is retried after the data-only view opens.
 - A malformed pasted invitation was erased during validation; it now remains
   editable while the error is shown.
 - Local user actions could race a short track's automatic `next`, causing stale
@@ -155,6 +175,11 @@ Zuradio and Deploy Zuradio Web Companion GitHub Actions workflows.
   readiness.
 - Mobile host controls and queue content were previously hidden; all output and
   queue controls are now visible at phone width.
+- The metadata-rescan test clicked while the host intentionally rejected input
+  in its busy state; it now waits for the explicit accessible busy signal.
+- Temporary upload staging names hid the true extension from Lofty and managed
+  digest suffixes leaked into fallback titles; staged files now preserve their
+  extension and display-name inference strips the digest.
 
 ## Remaining release-channel gates
 

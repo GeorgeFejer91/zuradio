@@ -78,6 +78,17 @@ export type Action =
   | { kind: "playlist_move"; playlistId: string; from: number; to: number }
   | { kind: "favorite_set"; trackId: string; favorite: boolean }
   | {
+      kind: "edit_track_metadata";
+      trackId: string;
+      title: string;
+      artist: string;
+      album: string;
+      albumArtist: string;
+      trackNumber: number | null;
+      discNumber: number | null;
+      year: number | null;
+    }
+  | {
       kind: "report_playback";
       status: PlaybackStatus;
       positionMs: number;
@@ -107,9 +118,11 @@ export interface BroadcastSession {
   controllerRoom: string;
   controllerStream: string;
   controllerTransportKey: string;
-  controllerPairingKey: string;
+  passwordSalt: string;
+  passwordIterations: number;
   listenerInvitation: string;
   controllerInvitation: string;
+  uploadInvitation: string;
 }
 
 export interface WireErrorShape {
@@ -119,15 +132,48 @@ export interface WireErrorShape {
 }
 
 export interface CompanionInvitation {
-  version: "1";
-  role: "listener" | "controller";
+  version: "2";
+  mode: RemoteMode;
   session: string;
   epoch: number;
-  listenRoom: string;
-  listenStream: string;
-  listenTransportKey: string;
-  controllerRoom?: string;
-  controllerStream?: string;
-  controllerTransportKey?: string;
-  pairingKey?: string;
+  controllerRoom: string;
+  controllerStream: string;
+  controllerTransportKey: string;
+  passwordSalt: string;
+  passwordIterations: number;
+}
+
+export type RemoteMode = "listen" | "control" | "upload";
+
+export interface UploadFileSpec {
+  fileId: string;
+  relativePath: string;
+  size: number;
+}
+
+export type UploadOperation =
+  | { kind: "begin"; transferId: string; files: UploadFileSpec[] }
+  | { kind: "chunk"; transferId: string; fileId: string; offset: number; data: string }
+  | { kind: "finish_file"; transferId: string; fileId: string; sha256: string }
+  | { kind: "commit"; transferId: string }
+  | { kind: "abort"; transferId: string };
+
+export interface ImportedFile {
+  title: string;
+  artist: string;
+  album: string;
+  year: number | null;
+}
+
+export interface UploadOutcome {
+  status: string;
+  transferId: string;
+  fileId: string | null;
+  received: number | null;
+  imported: ImportedFile[];
+}
+
+export interface RemoteUploadResponse {
+  outcome: UploadOutcome;
+  snapshot: AppSnapshot | null;
 }

@@ -9,6 +9,10 @@ interface RuntimeFile {
 const runtimePath = process.env.ZURADIO_RUNTIME;
 if (!runtimePath) throw new Error("ZURADIO_RUNTIME must name the running daemon's runtime.json");
 const runtime = JSON.parse(fs.readFileSync(runtimePath, "utf8")) as RuntimeFile;
+const passwordPath = process.env.ZURADIO_TEST_PASSWORD_FILE;
+if (!passwordPath) throw new Error("ZURADIO_TEST_PASSWORD_FILE must name the daemon password file");
+const password = fs.readFileSync(passwordPath, "utf8").replace(/[\r\n]+$/, "");
+const initialTrackCount = process.env.ZURADIO_FORMAT_FIXTURES === "1" ? 8 : 3;
 
 test("streams from the laptop while enforcing listener and controller roles", async ({ browser }) => {
   test.setTimeout(120_000);
@@ -22,9 +26,12 @@ test("streams from the laptop while enforcing listener and controller roles", as
     await expect(host.getByRole("heading", { name: "Zuradio", exact: true })).toBeVisible();
     await host.evaluate(() => fetch("/api/v1/broadcast/stop", { method: "POST" }));
     await host.reload();
-    await expect(host.locator("[data-track-row]")).toHaveCount(3);
+    await expect(host.locator("[data-track-row]")).toHaveCount(initialTrackCount);
+    const hostRows = host.locator("[data-track-row]");
+    const firstTitle = (await hostRows.nth(0).locator(".track-title strong").textContent()) ?? "";
+    const secondTitle = (await hostRows.nth(1).locator(".track-title strong").textContent()) ?? "";
     await host.locator("[data-track-row]").first().getByRole("button", { name: /^Play / }).click();
-    await expect(host.getByTestId("now-title")).toHaveText("01-Sunrise");
+    await expect(host.getByTestId("now-title")).toHaveText(firstTitle);
     await host.getByRole("button", { name: /Broadcast/ }).click();
     await host.getByTestId("start-broadcast").click();
     await expect(host.getByTestId("stop-broadcast")).toBeVisible({ timeout: 35_000 });
@@ -36,13 +43,14 @@ test("streams from the laptop while enforcing listener and controller roles", as
     watch(listener, "listener", errors);
     await listener.goto(listenerInvitation);
     await expect.poll(() => new URL(listener.url()).hash).toBe("");
-    await expect(listener.getByText("Listener", { exact: true })).toBeVisible();
-    await expect(listener.getByText(/Listener access is read-only/)).toBeVisible();
+    await expect(listener.getByText("Listen", { exact: true })).toBeVisible();
+    await expect(listener.getByText(/Listen access is read-only/)).toBeVisible();
     await expect(listener.getByLabel("Remote player controls")).toHaveCount(0);
     await expect(listener.getByRole("navigation", { name: "Controller sections" })).toHaveCount(0);
+    await listener.getByTestId("password").fill(password);
     await listener.getByTestId("connect").click();
     await expect(listener.getByText("Listening live", { exact: true })).toBeVisible({ timeout: 45_000 });
-    await expect(listener.getByTestId("companion-title")).toHaveText("01-Sunrise", { timeout: 20_000 });
+    await expect(listener.getByTestId("companion-title")).toHaveText(firstTitle, { timeout: 20_000 });
     await listener.waitForFunction(() => {
       const audio = document.querySelector<HTMLAudioElement>('audio[aria-label="Live Zuradio audio"]');
       return Boolean(audio?.srcObject && (audio.srcObject as MediaStream).getAudioTracks().length === 1);
@@ -53,10 +61,11 @@ test("streams from the laptop while enforcing listener and controller roles", as
     watch(controller, "controller", errors);
     await controller.goto(controllerInvitation);
     await expect.poll(() => new URL(controller.url()).hash).toBe("");
-    await expect(controller.getByText("Controller", { exact: true })).toBeVisible();
+    await expect(controller.getByText("Control", { exact: true })).toBeVisible();
+    await controller.getByTestId("password").fill(password);
     await controller.getByTestId("connect").click();
     await expect(controller.getByText("Controller connected", { exact: true })).toBeVisible({ timeout: 45_000 });
-    await expect(controller.locator(".controller-panel .track-row")).toHaveCount(3);
+    await expect(controller.locator(".controller-panel .track-row")).toHaveCount(initialTrackCount);
     const remotePlayPause = controller.getByTestId("remote-play-pause");
     if ((await remotePlayPause.textContent()) === "Play") {
       await remotePlayPause.click();
@@ -70,11 +79,11 @@ test("streams from the laptop while enforcing listener and controller roles", as
     await remotePlayPause.click();
     await expect(host.getByTestId("play-pause")).toHaveAttribute("aria-label", "Pause");
 
-    await controller.getByRole("searchbox", { name: "Search library" }).fill("River");
+    await controller.getByRole("searchbox", { name: "Search library" }).fill("Arpent");
     await expect(controller.locator(".controller-panel .track-row")).toHaveCount(1);
-    await controller.getByRole("button", { name: "Play 02-River" }).click();
-    await expect(host.getByTestId("now-title")).toHaveText("02-River");
-    await expect(listener.getByTestId("companion-title")).toHaveText("02-River");
+    await controller.getByRole("button", { name: "Play Arpent" }).click();
+    await expect(host.getByTestId("now-title")).toHaveText("Arpent");
+    await expect(listener.getByTestId("companion-title")).toHaveText("Arpent");
     await controller.getByTestId("remote-play-pause").click();
     await expect(controller.getByTestId("remote-play-pause")).toHaveText("Play");
 
@@ -127,11 +136,11 @@ test("streams from the laptop while enforcing listener and controller roles", as
     await controllerRows.nth(0).getByRole("button", { name: /Add .* to queue/ }).click();
     await controllerRows.nth(1).getByRole("button", { name: /Add .* to queue/ }).click();
     await controllerRows.nth(2).getByRole("button", { name: /Add .* to queue/ }).click();
-    await controllerRows.nth(0).getByRole("button", { name: "Play 01-Sunrise" }).click();
+    await controllerRows.nth(0).getByRole("button", { name: `Play ${firstTitle}` }).click();
     await controller.getByRole("button", { name: "Next", exact: true }).click();
-    await expect(host.getByTestId("now-title")).toHaveText("02-River");
+    await expect(host.getByTestId("now-title")).toHaveText(secondTitle);
     await controller.getByRole("button", { name: "Previous", exact: true }).click();
-    await expect(host.getByTestId("now-title")).toHaveText("01-Sunrise");
+    await expect(host.getByTestId("now-title")).toHaveText(firstTitle);
     await controller.getByRole("button", { name: "Stop", exact: true }).click();
     await expect(host.getByTestId("play-pause")).toHaveAttribute("aria-label", "Play");
 

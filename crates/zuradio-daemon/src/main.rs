@@ -4,7 +4,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
 use zuradio_core::{Action, RepeatMode};
-use zuradio_daemon::{client, default_data_dir, server};
+use zuradio_daemon::{client, default_data_dir, default_remote_password_file, server};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -35,6 +35,8 @@ enum Command {
         no_open: bool,
         #[arg(long, default_value = "https://georgefejer91.github.io/zuradio/")]
         companion_url: String,
+        #[arg(long, env = "ZURADIO_REMOTE_PASSWORD_FILE")]
+        remote_password_file: Option<PathBuf>,
     },
     /// Scan one or more local folders into the catalog.
     Scan {
@@ -155,6 +157,7 @@ async fn main() -> anyhow::Result<()> {
             web_root,
             no_open,
             companion_url,
+            remote_password_file,
         } => {
             server::serve(server::ServeOptions {
                 data_dir: cli.data_dir,
@@ -163,6 +166,7 @@ async fn main() -> anyhow::Result<()> {
                 web_root,
                 open_browser: !no_open,
                 companion_url,
+                remote_password_file: remote_password_file.or_else(default_remote_password_file),
             })
             .await?;
         }
