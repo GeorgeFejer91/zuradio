@@ -8,6 +8,11 @@ service_dir="$HOME/.config/systemd/user"
 desktop_dir="$HOME/.local/share/applications"
 icon_dir="$HOME/.local/share/icons/hicolor/scalable/apps"
 data_dir="$HOME/.local/share/zuradio"
+music_dir=$(xdg-user-dir MUSIC 2>/dev/null || true)
+if [ -z "$music_dir" ]; then
+  music_dir="$HOME/Music"
+fi
+library_dir="$music_dir/Zuradio Library"
 
 cd "$project_dir/web"
 npm ci
@@ -19,8 +24,9 @@ cd "$project_dir"
 cargo test --workspace --exclude zuradio-desktop
 cargo build --release -p zuradio-daemon
 
-mkdir -p "$install_root/web" "$binary_dir" "$service_dir" "$desktop_dir" "$icon_dir" "$data_dir"
+mkdir -p "$install_root/web" "$binary_dir" "$service_dir" "$desktop_dir" "$icon_dir" "$data_dir" "$library_dir"
 chmod 0700 "$data_dir"
+chmod 0700 "$library_dir"
 install -m 0755 "$project_dir/target/release/zuradio" "$install_root/zuradio"
 install -m 0755 "$project_dir/target/release/zuradio" "$binary_dir/zuradio"
 install -m 0755 "$project_dir/packaging/linux/zuradio-launch" "$binary_dir/zuradio-launch"
@@ -53,7 +59,6 @@ if [ "$attempt" -ge 100 ]; then
   exit 1
 fi
 
-music_dir=$(xdg-user-dir MUSIC 2>/dev/null || true)
 if [ -n "$music_dir" ] && [ -d "$music_dir" ]; then
   "$binary_dir/zuradio" scan "$music_dir" >/dev/null
 fi

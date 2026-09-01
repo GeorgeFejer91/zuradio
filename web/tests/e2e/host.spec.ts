@@ -4,6 +4,7 @@ import { expect, test } from "@playwright/test";
 
 interface RuntimeFile {
   baseUrl: string;
+  cliToken: string;
   hostUrl: string;
 }
 
@@ -182,6 +183,89 @@ test("drives playback, queue, favorite, seek, volume, shuffle, repeat, and histo
   }
   await volume.fill(initialVolume);
   if (initiallyMuted) await page.getByRole("button", { name: "Mute" }).click();
+});
+
+test("keeps a laptop seek authoritative over a concurrent update and stale playback snapshots", async ({
+  page,
+  request,
+}) => {
+  await page.getByRole("button", { name: /Library/ }).click();
+  await page.locator("[data-track-row]").first().getByRole("button", { name: /^Play / }).click();
+  await page.waitForFunction(() => {
+    const audio = document.querySelector("audio");
+    return Boolean(audio && Number.isFinite(audio.duration) && audio.duration > 20 && !audio.paused);
+  });
+
+  await page.getByTestId("seek").fill("1000");
+  await expect
+    .poll(async () => {
+      const response = await request.get(`${runtime.baseUrl}/api/v1/snapshot`, {
+        headers: { Authorization: `Bearer ${runtime.cliToken}` },
+      });
+      const state = (await response.json()) as { player: { positionMs: number } };
+      return state.player.positionMs;
+    })
+    .toBe(1000);
+
+  const volume = page.getByTestId("volume");
+  const initialVolume = Number(await volume.inputValue());
+  const competingVolume: number = initialVolume === 17 ? 18 : 17;
+  let injectedConcurrentUpdate = false;
+  await page.route("**/api/v1/action", async (route) => {
+    const body = route.request().postDataJSON() as { action?: { kind?: string; positionMs?: number } };
+    if (
+      !injectedConcurrentUpdate &&
+      body.action?.kind === "seek" &&
+      body.action.positionMs === 10_000
+    ) {
+      injectedConcurrentUpdate = true;
+      const snapshotResponse = await request.get(`${runtime.baseUrl}/api/v1/snapshot`, {
+        headers: { Authorization: `Bearer ${runtime.cliToken}` },
+      });
+      const state = (await snapshotResponse.json()) as { revision: number };
+      const competingResponse = await request.post(`${runtime.baseUrl}/api/v1/action`, {
+        headers: { Authorization: `Bearer ${runtime.cliToken}` },
+        data: {
+          protocol: 1,
+          commandId: crypto.randomUUID(),
+          expectedRevision: state.revision,
+          actor: { role: "local", peerId: null },
+          action: { kind: "set_volume", volume: competingVolume },
+        },
+      });
+      expect(competingResponse.ok(), "competing state update must be accepted").toBe(true);
+    }
+    await route.continue();
+  });
+
+  await page.getByTestId("seek").fill("10000");
+  expect(injectedConcurrentUpdate).toBe(true);
+  await expect
+    .poll(async () => {
+      const response = await request.get(`${runtime.baseUrl}/api/v1/snapshot`, {
+        headers: { Authorization: `Bearer ${runtime.cliToken}` },
+      });
+      const state = (await response.json()) as { player: { positionMs: number } };
+      return state.player.positionMs;
+    })
+    .toBe(10_000);
+  await expect
+    .poll(() => page.locator("audio").evaluate((element: HTMLAudioElement) => element.currentTime))
+    .toBeGreaterThan(9.5);
+
+  await expect
+    .poll(() => page.locator("audio").evaluate((element: HTMLAudioElement) => element.currentTime))
+    .toBeGreaterThan(12.75);
+  const beforeUnrelatedUpdate = await page
+    .locator("audio")
+    .evaluate((element: HTMLAudioElement) => element.currentTime);
+  const finalVolume = 23;
+  await volume.fill(String(finalVolume));
+  await expect
+    .poll(() => page.locator("audio").evaluate((element: HTMLAudioElement) => element.currentTime))
+    .toBeGreaterThan(beforeUnrelatedUpdate - 0.75);
+
+  await volume.fill(String(initialVolume));
 });
 
 test("moves and clears the queue", async ({ page }) => {

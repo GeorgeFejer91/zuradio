@@ -3,7 +3,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use uuid::Uuid;
 
-use crate::catalog::{Catalog, scan_music};
+use crate::catalog::{Catalog, scan_file, scan_music};
 use crate::model::StoredCommand;
 use crate::{
     Action, ActionRequest, ActionResult, AppSnapshot, Artwork, CoreError, HistoryEntry,
@@ -75,6 +75,20 @@ impl ZuradioCore {
         self.snapshot()
     }
 
+    /// Adds or refreshes one file without rescanning the rest of the collection.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file is outside `root`, unsupported, unreadable,
+    /// or cannot be persisted.
+    pub fn catalog_file(&mut self, path: &Path, root: &Path) -> Result<AppSnapshot, CoreError> {
+        let track = scan_file(path, root)?;
+        self.catalog.upsert_scan(&track)?;
+        self.bump_revision();
+        self.persist()?;
+        self.snapshot()
+    }
+
     /// Resolves an available track to its canonical local path.
     ///
     /// # Errors
@@ -115,6 +129,7 @@ impl ZuradioCore {
         }
         if let Some(expected) = request.expected_revision
             && expected != self.state.revision
+            && !has_local_player_priority(&request)
         {
             return Err(CoreError::Conflict);
         }
@@ -152,7 +167,10 @@ impl ZuradioCore {
             Action::Pause => self.state.player.status = PlaybackStatus::Paused,
             Action::Stop => self.stop(),
             Action::PlayTrack { track_id } => self.play_track(&track_id)?,
-            Action::Seek { position_ms } => self.seek(position_ms)?,
+            Action::Seek {
+                position_ms,
+                track_id,
+            } => self.seek(position_ms, track_id.as_deref())?,
             Action::Next => self.next(false),
             Action::Previous => self.previous(),
             Action::SetVolume { volume } => self.set_volume(volume)?,
@@ -357,10 +375,13 @@ impl ZuradioCore {
         Ok(())
     }
 
-    fn seek(&mut self, position_ms: u64) -> Result<(), CoreError> {
+    fn seek(&mut self, position_ms: u64, expected_track_id: Option<&str>) -> Result<(), CoreError> {
         let Some(track_id) = self.state.player.current_track_id.as_deref() else {
             return Err(CoreError::InvalidInput("no track is selected".into()));
         };
+        if expected_track_id.is_some_and(|expected| expected != track_id) {
+            return Err(CoreError::Conflict);
+        }
         let track = self
             .catalog
             .track(track_id)?
@@ -545,6 +566,29 @@ impl ZuradioCore {
     }
 }
 
+fn has_local_player_priority(request: &ActionRequest) -> bool {
+    if request.actor.role != Role::Local {
+        return false;
+    }
+    matches!(
+        &request.action,
+        Action::Play
+            | Action::Pause
+            | Action::Stop
+            | Action::PlayTrack { .. }
+            | Action::Seek {
+                track_id: Some(_),
+                ..
+            }
+            | Action::Next
+            | Action::Previous
+            | Action::SetVolume { .. }
+            | Action::SetMuted { .. }
+            | Action::SetShuffle { .. }
+            | Action::SetRepeat { .. }
+    )
+}
+
 fn validate_request(request: &ActionRequest) -> Result<(), CoreError> {
     if request.protocol != PROTOCOL_VERSION {
         return Err(CoreError::InvalidInput(
@@ -658,12 +702,104 @@ mod tests {
             Action::PlaylistCreate { name: "One".into() },
         ))?;
         assert!(matches!(
-            core.execute(request(initial, Action::Pause)),
+            core.execute(request(
+                initial,
+                Action::PlaylistCreate { name: "Two".into() },
+            )),
             Err(CoreError::Conflict)
         ));
         let mut listener = request(core.snapshot()?.revision, Action::Pause);
         listener.actor.role = Role::Listener;
         assert!(matches!(core.execute(listener), Err(CoreError::Forbidden)));
+        Ok(())
+    }
+
+    #[test]
+    fn local_player_command_wins_a_concurrent_controller_revision() -> Result<(), CoreError> {
+        let mut core = ZuradioCore::in_memory()?;
+        let initial = core.snapshot()?.revision;
+        let mut controller = request(initial, Action::SetVolume { volume: 12 });
+        controller.actor = Actor {
+            role: Role::Controller,
+            peer_id: Some("browser-controller".into()),
+        };
+        core.execute(controller)?;
+
+        core.execute(request(initial, Action::SetVolume { volume: 42 }))?;
+        let local = core.snapshot()?;
+        assert_eq!(local.player.volume, 42);
+
+        let mut stale_controller = request(
+            local.revision.saturating_sub(1),
+            Action::SetVolume { volume: 7 },
+        );
+        stale_controller.actor = Actor {
+            role: Role::Controller,
+            peer_id: Some("browser-controller".into()),
+        };
+        assert!(matches!(
+            core.execute(stale_controller),
+            Err(CoreError::Conflict)
+        ));
+        assert_eq!(core.snapshot()?.player.volume, 42);
+        Ok(())
+    }
+
+    #[test]
+    fn local_seek_never_rebases_onto_a_remotely_selected_track()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempdir()?;
+        let album = directory.path().join("Artist/Album");
+        fs::create_dir_all(&album)?;
+        fs::write(album.join("01 - First.mp3"), b"first fixture")?;
+        fs::write(album.join("02 - Second.mp3"), b"second fixture")?;
+        let mut core = ZuradioCore::in_memory()?;
+        let scanned = core.scan(&[directory.path().to_path_buf()])?;
+        let first = scanned
+            .tracks
+            .first()
+            .ok_or("first track missing")?
+            .id
+            .clone();
+        let second = scanned
+            .tracks
+            .get(1)
+            .ok_or("second track missing")?
+            .id
+            .clone();
+        core.execute(request(
+            scanned.revision,
+            Action::PlayTrack {
+                track_id: first.clone(),
+            },
+        ))?;
+        let before_remote = core.snapshot()?.revision;
+
+        let mut controller = request(
+            before_remote,
+            Action::PlayTrack {
+                track_id: second.clone(),
+            },
+        );
+        controller.actor = Actor {
+            role: Role::Controller,
+            peer_id: Some("browser-controller".into()),
+        };
+        core.execute(controller)?;
+
+        assert!(matches!(
+            core.execute(request(
+                before_remote,
+                Action::Seek {
+                    position_ms: 12_000,
+                    track_id: Some(first),
+                },
+            )),
+            Err(CoreError::Conflict)
+        ));
+        let current = core.snapshot()?;
+        assert_eq!(current.player.current_track_id, Some(second));
+        assert_eq!(current.player.position_ms, 0);
         Ok(())
     }
 
@@ -733,6 +869,69 @@ mod tests {
         assert_eq!(edited.artist, "Edited Artist");
         assert_eq!(edited.album, "Edited Album");
         assert_eq!(edited.year, Some(2030));
+        Ok(())
+    }
+
+    #[test]
+    fn catalogues_one_new_file_without_hiding_existing_tracks()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempdir()?;
+        let first = directory.path().join("Artist/Album/01 - First.mp3");
+        let second = directory.path().join("Artist/Album/02 - Second.mp3");
+        fs::create_dir_all(first.parent().ok_or("missing parent")?)?;
+        fs::write(&first, b"first fixture")?;
+        let mut core = ZuradioCore::in_memory()?;
+        core.scan(&[directory.path().to_path_buf()])?;
+
+        fs::write(&second, b"second fixture")?;
+        let snapshot = core.catalog_file(&second, directory.path())?;
+
+        assert_eq!(snapshot.tracks.len(), 2);
+        assert!(snapshot.tracks.iter().any(|track| track.title == "First"));
+        assert!(snapshot.tracks.iter().any(|track| track.title == "Second"));
+        Ok(())
+    }
+
+    #[test]
+    fn snapshots_hide_unavailable_tracks_without_erasing_playlist_references()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempdir()?;
+        let first = directory.path().join("Artist/Album/01 - First.mp3");
+        let second = directory.path().join("Artist/Album/02 - Second.mp3");
+        fs::create_dir_all(first.parent().ok_or("missing parent")?)?;
+        fs::write(&first, b"first fixture")?;
+        fs::write(&second, b"second fixture")?;
+        let mut core = ZuradioCore::in_memory()?;
+        let scanned = core.scan(&[directory.path().to_path_buf()])?;
+        let second_id = scanned
+            .tracks
+            .iter()
+            .find(|track| track.title == "Second")
+            .ok_or("second track missing")?
+            .id
+            .clone();
+        core.execute(request(
+            scanned.revision,
+            Action::PlaylistCreate {
+                name: "Preserved".into(),
+            },
+        ))?;
+        let with_playlist = core.snapshot()?;
+        let playlist_id = with_playlist.playlists[0].id.clone();
+        core.execute(request(
+            with_playlist.revision,
+            Action::PlaylistAdd {
+                playlist_id,
+                track_id: second_id.clone(),
+            },
+        ))?;
+
+        fs::remove_file(&second)?;
+        let rescanned = core.scan(&[directory.path().to_path_buf()])?;
+
+        assert_eq!(rescanned.tracks.len(), 1);
+        assert_eq!(rescanned.tracks[0].title, "First");
+        assert_eq!(rescanned.playlists[0].track_ids, vec![second_id]);
         Ok(())
     }
 }

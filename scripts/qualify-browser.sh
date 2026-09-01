@@ -31,7 +31,9 @@ fi
 
 qualification_dir=$(mktemp -d "$project_dir/target/zuradio-browser.XXXXXX")
 data_dir="$qualification_dir/data"
+library_dir="$qualification_dir/library"
 format_dir="$qualification_dir/formats"
+selection_dir="$music_dir"
 password_file="$qualification_dir/password.txt"
 install -m 0600 "$password_source" "$password_file"
 mkdir -p "$format_dir"
@@ -42,6 +44,11 @@ if command -v sox >/dev/null 2>&1 && command -v flac >/dev/null 2>&1; then
   sox "$format_dir/Zuradio Format WAV.wav" "$format_dir/Zuradio Format MP3.mp3" >/dev/null 2>&1
   sox "$format_dir/Zuradio Format WAV.wav" "$format_dir/Zuradio Format OGG.ogg" >/dev/null 2>&1
   flac --silent --force --output-name="$format_dir/Zuradio Format FLAC.flac" "$format_dir/Zuradio Format WAV.wav" 2>/dev/null
+  selection_dir="$qualification_dir/selection"
+  mkdir -p "$selection_dir"
+  install -m 0644 "$format_dir/Zuradio Format WAV.wav" "$selection_dir/Picker WAV.wav"
+  install -m 0644 "$format_dir/Zuradio Format FLAC.flac" "$selection_dir/Picker FLAC.flac"
+  install -m 0644 "$format_dir/Zuradio Format MP3.mp3" "$selection_dir/Picker MP3.mp3"
   format_fixtures=1
 fi
 daemon_pid=
@@ -63,6 +70,7 @@ trap cleanup EXIT INT TERM
 "$binary" --data-dir "$data_dir" serve \
   --music "$music_dir" \
   --music "$format_dir" \
+  --library "$library_dir" \
   --web-root "$web_root" \
   --no-open \
   --companion-url "$companion_base" \
@@ -93,7 +101,9 @@ ZURADIO_RUNTIME="$data_dir/runtime.json" \
 ZURADIO_TEST_PASSWORD_FILE="$password_file" \
 ZURADIO_UPLOAD_FIXTURE="$music_dir/Arpent.mp3" \
 ZURADIO_UPLOAD_FOLDER="$music_dir" \
+ZURADIO_UPLOAD_SELECTION_FOLDER="$selection_dir" \
 ZURADIO_UPLOAD_EXPECTED_TITLE="Arpent" \
 ZURADIO_FORMAT_FIXTURES="$format_fixtures" \
+ZURADIO_TEST_LIBRARY="$library_dir" \
 ZURADIO_COMPANION_BASE="$companion_base" \
 npx playwright test "$@"

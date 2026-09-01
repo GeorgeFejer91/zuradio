@@ -159,6 +159,8 @@ pub enum Action {
     },
     Seek {
         position_ms: u64,
+        #[serde(default)]
+        track_id: Option<String>,
     },
     Next,
     Previous,

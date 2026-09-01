@@ -32,6 +32,9 @@ credential does not turn an upload session into a controller or listener.
   actions and no live-audio route.
 
 Stopping or restarting a broadcast revokes every grant and partial transfer.
+Because partial transfers are not resumable across daemon restarts, startup
+also purges abandoned private staging directories. Files that already passed
+`finish_file` remain safely catalogued in the visible library.
 
 ## Upload transaction
 
@@ -42,9 +45,13 @@ Uploads use ordered operations acknowledged one at a time:
 2. `chunk` carries at most 8 KiB of base64 data and its exact expected offset.
 3. `finish_file` supplies the browser's SHA-256 digest; Rust compares it with
    the staged file.
-4. `commit` parses and classifies every staged file before moving any file into
-   the library. A failed batch is discarded instead of partly imported.
-5. `abort` explicitly removes a partial transfer.
+4. `finish_file` also parses, classifies, moves, incrementally catalogs, and
+   publishes that verified file immediately. This per-file commit means a later
+   failure does not hide or discard songs that already finished.
+5. `commit` confirms that every declared file completed and returns the full
+   imported-file summary.
+6. `abort` removes only incomplete private staging data; already catalogued
+   originals remain in the library.
 
 The daemon accepts at most 512 files, 512 MiB per file, and 16 GiB per batch.
 It rejects zero-byte files, special/path-traversal components, duplicate IDs,
@@ -60,10 +67,11 @@ accepted, cataloged, and preserved losslessly.
 
 ## Managed repository and metadata
 
-Completed files are stored under the private Zuradio data directory:
+Completed files are stored in the visible `Zuradio Library` folder inside the
+computer's Music folder (for example `~/Musik/Zuradio Library`):
 
 ```text
-library/<album artist>/<album (year)>/<track - title [digest]>.extension
+Zuradio Library/<album artist>/<album (year)>/<track - title [digest]>.extension
 ```
 
 The digest suffix avoids accidental overwrites and is hidden from fallback
@@ -78,6 +86,11 @@ display titles. Metadata precedence is:
 The local metadata editor can change title, artist, album, album artist, track,
 disc, and year. Overrides persist across rescans without rewriting the original
 audio tags.
+
+Transfer-related development must pass the staged browser/CLI upload-download
+benchmark in `scripts/verify-data-transfer.sh` before the complete browser gate.
+The benchmark verifies immediate first-file publication, organized placement,
+source-to-download SHA-256 equality, and throughput floors.
 
 ## Password file
 

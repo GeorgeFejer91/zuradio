@@ -26,6 +26,30 @@ pub fn default_data_dir() -> PathBuf {
     )
 }
 
+/// Returns the user-visible folder that owns originals imported by Zuradio.
+#[must_use]
+pub fn default_library_dir() -> PathBuf {
+    if let Some(path) = std::env::var_os("ZURADIO_LIBRARY_DIR") {
+        return PathBuf::from(path);
+    }
+
+    #[cfg(target_os = "windows")]
+    if let Some(profile) = std::env::var_os("USERPROFILE") {
+        return PathBuf::from(profile).join("Music/Zuradio Library");
+    }
+
+    let Some(home) = std::env::var_os("HOME").map(PathBuf::from) else {
+        return PathBuf::from("Zuradio Library");
+    };
+    for music_folder in ["Music", "Musik"] {
+        let candidate = home.join(music_folder);
+        if candidate.is_dir() {
+            return candidate.join("Zuradio Library");
+        }
+    }
+    home.join("Music/Zuradio Library")
+}
+
 /// Finds the configured remote password file without reading its contents.
 #[must_use]
 pub fn default_remote_password_file() -> Option<PathBuf> {

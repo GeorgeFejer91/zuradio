@@ -54,6 +54,14 @@ expected state revision, actor scope, and a closed action enum. Accepted command
 advance the revision and emit canonical state. Duplicate command IDs are safe to
 retry. Stale writes receive a conflict plus a fresh snapshot.
 
+The laptop operator is the highest-priority player authority. If a laptop player
+command and a controller command race from the same observed revision, the local
+command is rebased and applied after the controller command; the controller's
+now-stale command is rejected when the local command arrives first. Seeks carry
+the selected track ID as an additional precondition, so local priority can never
+move a different track after a simultaneous remote track change. A later remote
+command based on the newly published revision remains a valid new user action.
+
 The CLI, desktop UI, and remote bridge share that contract. Remote messages can
 never name a Rust function, executable, filesystem path, URL, or DOM operation.
 
@@ -62,22 +70,38 @@ never name a Rust function, executable, filesystem path, URL, or DOM operation.
 The persistent model covers tracks, artists, albums, playlists and ordered
 playlist entries, favorites, play history, the active queue, shuffle/repeat
 configuration, and last-known player state. Rebuildable scanner data is kept
-separate from user-authored state.
+separate from user-authored state. Canonical client snapshots contain only
+currently playable tracks; unavailable database rows remain internal so saved
+playlist and history references are not erased when a mount moves or a managed
+file is migrated.
 
-Remote uploads are transactional: the Rust daemon validates a declared batch,
-accepts ordered 8 KiB chunks into a private staging directory, verifies each
-SHA-256 digest, parses every file, and only then commits them to a managed local
-library. Embedded tags outrank folder/filename inference; persistent user
-overrides outrank both.
+Remote uploads are transactional per file: the Rust daemon validates a declared
+selection, accepts ordered 8 KiB chunks into a private staging directory, and
+verifies each SHA-256 digest. Each verified file is parsed, moved into the
+user-visible Music/Zuradio Library hierarchy, inserted into the catalog, and
+published to open clients before the next file finishes. A disconnect discards
+only incomplete staging data; completed originals remain available. Embedded
+tags outrank folder/filename inference; persistent user overrides outrank both.
+The broadcasting host renders acknowledged operations as a local transfer strip
+with the current path, byte progress, percentage, and per-file catalogue count,
+then preserves a completion or interruption result long enough for the laptop
+operator to see it.
 
 ## Live audio bridge
 
 Local playback remains authoritative. While broadcasting, the host browser loads
 the same current track from an authenticated loopback Range endpoint, aligns to
-the Rust-reported monotonic position, and routes it through Web Audio into a
+the Rust command position when the selected track or timeline changes, and routes
+it through Web Audio into a
 gain node connected to both the laptop speakers and a
 `MediaStreamAudioDestinationNode`. Only that destination stream is published;
 the companion never receives a file URL or independent per-listener queue.
+
+Between timeline commands, the media element's playback clock owns the live
+position. Revisioned snapshots that only change volume, playlists, queue data, or
+other state must not reapply an older position and rewind playback. A pending
+laptop seek is held locally until Rust acknowledges the matching track and
+position; stale transport projections cannot pull it backwards.
 
 This duplicates decoding only while broadcasting. A later native capture/Opus
 adapter can replace it without changing domain commands or remote authorization.

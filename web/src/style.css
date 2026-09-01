@@ -578,6 +578,66 @@ h3 {
   color: #ffc0b9;
 }
 
+.transfer-activity {
+  display: grid;
+  grid-template-columns: minmax(220px, 1fr) minmax(260px, 0.8fr);
+  align-items: center;
+  gap: 20px;
+  min-height: 62px;
+  padding: 10px 20px;
+  border-bottom: 1px solid var(--line-strong);
+  background: #151513;
+}
+
+.transfer-activity.phase-interrupted {
+  border-bottom-color: var(--danger);
+}
+
+.transfer-activity-copy,
+.transfer-activity-progress {
+  display: grid;
+  gap: 5px;
+  min-width: 0;
+}
+
+.transfer-activity-copy span,
+.transfer-activity-progress span {
+  overflow: hidden;
+  color: var(--muted);
+  font-size: 12px;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.transfer-activity.phase-complete strong,
+.transfer-activity.phase-complete .transfer-activity-progress span:first-child {
+  color: var(--success);
+}
+
+.transfer-activity.phase-interrupted strong {
+  color: #ffc0b9;
+}
+
+.transfer-activity progress {
+  width: 100%;
+  height: 5px;
+  border: 0;
+  border-radius: 0;
+  background: #292925;
+}
+
+.transfer-activity progress::-webkit-progress-bar {
+  background: #292925;
+}
+
+.transfer-activity progress::-webkit-progress-value {
+  background: var(--accent);
+}
+
+.transfer-activity progress::-moz-progress-bar {
+  background: var(--accent);
+}
+
 .metadata-backdrop {
   position: fixed;
   z-index: 50;
@@ -1502,6 +1562,10 @@ button .ui-icon {
   grid-template-rows: auto minmax(0, 1fr);
 }
 
+.main.has-transfer {
+  grid-template-rows: auto auto minmax(0, 1fr);
+}
+
 .toolbar {
   min-height: 72px;
   padding: 12px 18px;
@@ -2333,6 +2397,12 @@ button .ui-icon {
 
   .toolbar-search {
     width: 100%;
+  }
+
+  .transfer-activity {
+    grid-template-columns: 1fr;
+    gap: 8px;
+    padding: 10px 13px;
   }
 
   .scan-button {

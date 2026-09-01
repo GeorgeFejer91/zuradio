@@ -3,7 +3,15 @@ import "./style.css";
 import { ZuradioApi } from "./api";
 import { AudioEngine } from "./audio-engine";
 import { icon, type IconName } from "./icons";
-import type { Action, AppSnapshot, BroadcastSession, Playlist, Track } from "./types";
+import type {
+  Action,
+  AppSnapshot,
+  BroadcastSession,
+  Playlist,
+  RemoteUploadResponse,
+  Track,
+  UploadOperation,
+} from "./types";
 import { HostBroadcastBridge } from "./vdo";
 import { renderSoundVisualizer, SvgSoundVisualizer } from "./visualizer";
 
@@ -30,6 +38,8 @@ let taskTail: Promise<void> = Promise.resolve();
 let checkingBroadcastOwnership = false;
 let automaticBroadcastRetryTimer = 0;
 let automaticBroadcastRetryCount = 0;
+let transferActivity: TransferActivity | null = null;
+let transferClearTimer = 0;
 const BROADCAST_START_ATTEMPTS = 5;
 const AUTOMATIC_BROADCAST_RETRY_DELAYS_MS = [5_000, 10_000, 30_000, 60_000] as const;
 
@@ -59,16 +69,26 @@ const bridge = new HostBroadcastBridge({
     const current = api.currentSnapshot;
     if (current) {
       snapshot = current;
-      await audio.sync(current);
+      await audio.sync(current, { forcePosition: remotePayloadChangesTimeline(payload) });
       render();
     }
     return result;
   },
   upload: async (payload) => {
-    const result = await api.remoteUpload(payload);
-    snapshot = api.currentSnapshot;
-    render();
-    return result;
+    const operation = uploadOperation(payload);
+    prepareTransferActivity(operation);
+    try {
+      const result = await api.remoteUpload(payload);
+      updateTransferActivity(operation, result);
+      snapshot = api.currentSnapshot;
+      if (result.snapshot) render();
+      else refreshTransferActivity();
+      return result;
+    } catch (error) {
+      failTransferActivity(operation, messageOf(error));
+      refreshTransferActivity();
+      throw error;
+    }
   },
   onSessionReplaced: () => {
     markBroadcastReplaced();
@@ -111,8 +131,10 @@ root.addEventListener("change", (event) => {
   if (target.matches("[data-volume]")) void perform({ kind: "set_volume", volume: Number(target.value) });
   if (target.matches("[data-seek]")) {
     const value = Number(target.value);
+    const trackId = snapshot?.player.currentTrackId;
+    if (!trackId) return;
     audio.seek(value);
-    void perform({ kind: "seek", positionMs: value });
+    void perform({ kind: "seek", positionMs: value, trackId });
   }
 });
 
@@ -141,6 +163,7 @@ async function verifyBroadcastOwnership(): Promise<void> {
 
 function markBroadcastReplaced(): void {
   broadcastSession = null;
+  interruptTransferActivity("Broadcast replaced before the transfer finished");
   showMessage("A newer Zuradio window replaced this broadcast", true);
   render();
 }
@@ -148,15 +171,25 @@ function markBroadcastReplaced(): void {
 async function initialize(): Promise<void> {
   try {
     snapshot = await api.bootstrap();
-    positionMs = snapshot.player.positionMs;
     broadcastSession = await api.broadcastStatus();
     selectedPlaylistId = snapshot.playlists[0]?.id ?? null;
     await audio.sync(snapshot);
     api.subscribe((next) => {
+      const availableTrackCount = (state: AppSnapshot): number =>
+        state.tracks.filter((track) => track.available).length;
+      const addedTracks = Math.max(
+        0,
+        availableTrackCount(next) - (snapshot ? availableTrackCount(snapshot) : availableTrackCount(next)),
+      );
       snapshot = next;
-      positionMs = next.player.positionMs;
       void audio.sync(next).catch((error: unknown) => showMessage(messageOf(error), true));
       bridge.publishState(next);
+      if (addedTracks > 0) {
+        showMessage(
+          `${addedTracks} new track${addedTracks === 1 ? "" : "s"} catalogued and added to the library`,
+          false,
+        );
+      }
       render();
     });
     render();
@@ -193,7 +226,7 @@ async function handleClick(target: HTMLElement): Promise<void> {
   if (action === "scan") {
     await task(async () => {
       snapshot = await api.scan();
-      showMessage(`Library scan complete: ${snapshot.tracks.length} tracks`, false);
+      showMessage(`Library scan complete: ${availableTracks(snapshot).length} tracks`, false);
       render();
     });
     return;
@@ -257,6 +290,7 @@ async function handleClick(target: HTMLElement): Promise<void> {
       await bridge.stop();
       await api.stopBroadcast();
       broadcastSession = null;
+      interruptTransferActivity("Transfer interrupted because broadcasting stopped");
       showMessage("Broadcast stopped; remote connections are revoked", false);
       render();
     });
@@ -434,15 +468,40 @@ async function saveMetadata(form: HTMLFormElement): Promise<void> {
 async function perform(action: Action, unlock = true): Promise<void> {
   await task(async () => {
     if (unlock && (action.kind === "play" || action.kind === "play_track")) await audio.unlock();
-    await api.action(action);
+    try {
+      await api.action(action);
+    } catch (error) {
+      if (action.kind === "seek") {
+        audio.cancelLocalSeek();
+        const current = api.currentSnapshot;
+        if (current) {
+          snapshot = current;
+          await audio.sync(current, { forcePosition: true });
+        }
+      }
+      throw error;
+    }
     snapshot = api.currentSnapshot;
     if (snapshot) {
-      positionMs = snapshot.player.positionMs;
-      await audio.sync(snapshot);
+      await audio.sync(snapshot, { forcePosition: actionChangesTimeline(action) });
       bridge.publishState(snapshot);
     }
     render();
   });
+}
+
+function actionChangesTimeline(action: Action): boolean {
+  return ["stop", "play_track", "seek", "next", "previous"].includes(action.kind);
+}
+
+function remotePayloadChangesTimeline(payload: unknown): boolean {
+  if (!payload || typeof payload !== "object") return false;
+  const request = (payload as { request?: unknown }).request;
+  if (!request || typeof request !== "object") return false;
+  const action = (request as { action?: unknown }).action;
+  if (!action || typeof action !== "object") return false;
+  const kind = (action as { kind?: unknown }).kind;
+  return typeof kind === "string" && ["stop", "play_track", "seek", "next", "previous"].includes(kind);
 }
 
 async function createPlaylist(name: string): Promise<void> {
@@ -480,12 +539,13 @@ function render(): void {
   root.innerHTML = `
     <div class="shell view-${view}" aria-busy="${busy}">
       ${renderSidebar(snapshot)}
-      <main class="main">
+      <main class="main${transferActivity ? " has-transfer" : ""}">
         <div class="toolbar">
           <label class="toolbar-search">${icon("library")}<input class="search" data-search data-testid="search" type="search" value="${escapeAttribute(search)}" placeholder="Search title, artist, or album" aria-label="Search library" /></label>
           <span class="toolbar-spacer"></span>
           <button class="scan-button" data-action="scan" data-testid="scan-library" ${disabled()}>${icon("scan")}<span>Scan library</span></button>
         </div>
+        ${renderTransferActivity()}
         <div class="content">${renderContent(snapshot)}</div>
       </main>
       ${renderQueue(snapshot)}
@@ -499,10 +559,11 @@ function render(): void {
 }
 
 function renderSidebar(state: AppSnapshot): string {
+  const tracks = availableTracks(state);
   const items: Array<[View, string, number | string, IconName]> = [
-    ["library", "Library", state.tracks.length, "library"],
-    ["albums", "Albums", unique(state.tracks.map((track) => track.album)).length, "album"],
-    ["artists", "Artists", unique(state.tracks.map((track) => track.artist)).length, "artist"],
+    ["library", "Library", tracks.length, "library"],
+    ["albums", "Albums", unique(tracks.map((track) => track.album)).length, "album"],
+    ["artists", "Artists", unique(tracks.map((track) => track.artist)).length, "artist"],
     ["playlists", "Playlists", state.playlists.length, "playlist"],
     ["favorites", "Favorites", state.favorites.length, "heart"],
     ["history", "History", state.history.length, "history"],
@@ -538,9 +599,9 @@ function renderContent(state: AppSnapshot): string {
         state,
       );
     case "albums":
-      return renderGroups("Albums", groupTracks(state.tracks, (track) => track.album));
+      return renderGroups("Albums", groupTracks(availableTracks(state), (track) => track.album));
     case "artists":
-      return renderGroups("Artists", groupTracks(state.tracks, (track) => track.artist));
+      return renderGroups("Artists", groupTracks(availableTracks(state), (track) => track.artist));
     case "playlists":
       return renderPlaylists(state);
     case "history":
@@ -652,7 +713,9 @@ function renderPlaylistTracks(playlist: Playlist, state: AppSnapshot): string {
 
 function renderHistory(state: AppSnapshot): string {
   const byId = new Map(state.tracks.map((track) => [track.id, track]));
-  const tracks = state.history.map((entry) => byId.get(entry.trackId)).filter((track): track is Track => Boolean(track));
+  const tracks = state.history
+    .map((entry) => byId.get(entry.trackId))
+    .filter((track): track is Track => Boolean(track?.available));
   return renderTrackSection("Recently played", tracks, state);
 }
 
@@ -668,6 +731,7 @@ function renderBroadcast(): string {
   return `<section class="broadcast-panel">
     <h2>Broadcast</h2>
     <div class="broadcast-status live"><strong>Live</strong><p class="muted">Password discovery is active. Stopping revokes every connection and partial upload until the next manual start or app launch.</p></div>
+    <p class="muted">Laptop player controls take priority whenever a local and external command arrive together.</p>
     <button class="danger" data-action="stop-broadcast" data-testid="stop-broadcast" ${disabled()}>Stop broadcast</button>
     <div class="access-modes" data-testid="access-modes">
       <div><strong>Listen</strong><span>Live audio and current track</span></div>
@@ -747,10 +811,195 @@ function coverTone(value: string): number {
 
 function filteredTracks(state: AppSnapshot): Track[] {
   const query = search.trim().toLocaleLowerCase();
-  if (!query) return state.tracks;
-  return state.tracks.filter((track) =>
+  const tracks = availableTracks(state);
+  if (!query) return tracks;
+  return tracks.filter((track) =>
     [track.title, track.artist, track.album].some((value) => value.toLocaleLowerCase().includes(query)),
   );
+}
+
+function availableTracks(state: AppSnapshot): Track[] {
+  return state.tracks.filter((track) => track.available);
+}
+
+type TransferPhase = "receiving" | "cataloguing" | "finalizing" | "complete" | "interrupted";
+
+interface TransferFileActivity {
+  id: string;
+  path: string;
+  size: number;
+  received: number;
+  catalogued: boolean;
+  title: string | null;
+}
+
+interface TransferActivity {
+  id: string;
+  phase: TransferPhase;
+  files: TransferFileActivity[];
+  activeFileId: string | null;
+  detail: string | null;
+}
+
+function uploadOperation(payload: unknown): UploadOperation | null {
+  if (!payload || typeof payload !== "object") return null;
+  const operation = (payload as { operation?: unknown }).operation;
+  if (!operation || typeof operation !== "object") return null;
+  const candidate = operation as Record<string, unknown>;
+  if (typeof candidate.transferId !== "string" || candidate.transferId.length > 80) return null;
+  switch (candidate.kind) {
+    case "begin":
+      if (
+        !Array.isArray(candidate.files) ||
+        candidate.files.length < 1 ||
+        candidate.files.length > 512 ||
+        !candidate.files.every(
+          (file) =>
+            file &&
+            typeof file === "object" &&
+            typeof (file as Record<string, unknown>).fileId === "string" &&
+            typeof (file as Record<string, unknown>).relativePath === "string" &&
+            typeof (file as Record<string, unknown>).size === "number",
+        )
+      ) return null;
+      break;
+    case "chunk":
+      if (typeof candidate.fileId !== "string" || typeof candidate.offset !== "number") return null;
+      break;
+    case "finish_file":
+      if (typeof candidate.fileId !== "string" || typeof candidate.sha256 !== "string") return null;
+      break;
+    case "commit":
+    case "abort":
+      break;
+    default:
+      return null;
+  }
+  return operation as UploadOperation;
+}
+
+function prepareTransferActivity(operation: UploadOperation | null): void {
+  if (!operation) return;
+  if (operation.kind === "begin") {
+    window.clearTimeout(transferClearTimer);
+    transferClearTimer = 0;
+    transferActivity = {
+      id: operation.transferId,
+      phase: "receiving",
+      files: operation.files.map((file) => ({
+        id: file.fileId,
+        path: file.relativePath,
+        size: file.size,
+        received: 0,
+        catalogued: false,
+        title: null,
+      })),
+      activeFileId: operation.files[0]?.fileId ?? null,
+      detail: null,
+    };
+    render();
+    return;
+  }
+  if (!transferActivity || transferActivity.id !== operation.transferId) return;
+  if (operation.kind === "chunk") {
+    transferActivity.phase = "receiving";
+    transferActivity.activeFileId = operation.fileId;
+  } else if (operation.kind === "finish_file") {
+    transferActivity.phase = "cataloguing";
+    transferActivity.activeFileId = operation.fileId;
+    refreshTransferActivity();
+  } else if (operation.kind === "commit") {
+    transferActivity.phase = "finalizing";
+    transferActivity.activeFileId = null;
+    refreshTransferActivity();
+  }
+}
+
+function updateTransferActivity(operation: UploadOperation | null, response: RemoteUploadResponse): void {
+  if (!operation || !transferActivity || transferActivity.id !== operation.transferId) return;
+  if (operation.kind === "chunk") {
+    const file = transferActivity.files.find((candidate) => candidate.id === operation.fileId);
+    if (file && typeof response.outcome.received === "number") file.received = response.outcome.received;
+    return;
+  }
+  if (operation.kind === "finish_file") {
+    const file = transferActivity.files.find((candidate) => candidate.id === operation.fileId);
+    if (file) {
+      file.received = file.size;
+      file.catalogued = true;
+      file.title = response.outcome.imported[0]?.title ?? null;
+    }
+    transferActivity.phase = "receiving";
+    transferActivity.activeFileId =
+      transferActivity.files.find((candidate) => !candidate.catalogued)?.id ?? null;
+    return;
+  }
+  if (operation.kind === "commit") {
+    transferActivity.phase = "complete";
+    transferActivity.activeFileId = null;
+    transferActivity.detail = `${response.outcome.imported.length} new track${response.outcome.imported.length === 1 ? " is" : "s are"} ready in Zuradio Library`;
+    transferClearTimer = window.setTimeout(() => {
+      transferActivity = null;
+      transferClearTimer = 0;
+      refreshTransferActivity();
+    }, 15_000);
+  } else if (operation.kind === "abort") {
+    interruptTransferActivity("The remote browser cancelled the remaining transfer");
+  }
+}
+
+function failTransferActivity(operation: UploadOperation | null, reason: string): void {
+  if (!operation || !transferActivity || transferActivity.id !== operation.transferId) return;
+  interruptTransferActivity(reason);
+}
+
+function interruptTransferActivity(reason: string): void {
+  if (!transferActivity || transferActivity.phase === "complete") return;
+  transferActivity.phase = "interrupted";
+  transferActivity.activeFileId = null;
+  transferActivity.detail = reason;
+}
+
+function refreshTransferActivity(): void {
+  const current = root.querySelector<HTMLElement>("[data-testid='local-transfer-status']");
+  if (!current) {
+    render();
+    return;
+  }
+  current.outerHTML = renderTransferActivity();
+}
+
+function renderTransferActivity(): string {
+  if (!transferActivity) {
+    return `<section data-testid="local-transfer-status" hidden></section>`;
+  }
+  const totalBytes = transferActivity.files.reduce((total, file) => total + file.size, 0);
+  const receivedBytes = transferActivity.files.reduce((total, file) => total + file.received, 0);
+  const catalogued = transferActivity.files.filter((file) => file.catalogued).length;
+  const percent = totalBytes > 0 ? Math.min(100, Math.round((receivedBytes / totalBytes) * 100)) : 0;
+  const active = transferActivity.files.find((file) => file.id === transferActivity?.activeFileId);
+  const heading = {
+    receiving: "Receiving music from another computer",
+    cataloguing: "Cataloguing completed song",
+    finalizing: "Finalizing music transfer",
+    complete: "Transfer complete",
+    interrupted: "Transfer interrupted",
+  }[transferActivity.phase];
+  const detail = transferActivity.detail ?? active?.path ?? `Preparing ${transferActivity.files.length} files`;
+  return `<section class="transfer-activity phase-${transferActivity.phase}" data-testid="local-transfer-status" aria-live="polite">
+    <div class="transfer-activity-copy"><strong>${escapeHtml(heading)}</strong><span data-testid="local-transfer-file">${escapeHtml(detail)}</span></div>
+    <div class="transfer-activity-progress">
+      <span data-testid="local-transfer-count">${catalogued} of ${transferActivity.files.length} catalogued</span>
+      <progress max="${Math.max(totalBytes, 1)}" value="${receivedBytes}" aria-label="Music transfer progress">${percent}%</progress>
+      <span>${formatBytes(receivedBytes)} / ${formatBytes(totalBytes)} · ${percent}%</span>
+    </div>
+  </section>`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1_024) return `${bytes} B`;
+  if (bytes < 1_048_576) return `${(bytes / 1_024).toFixed(1)} KiB`;
+  return `${(bytes / 1_048_576).toFixed(1)} MiB`;
 }
 
 function groupTracks(tracks: Track[], field: (track: Track) => string): Map<string, Track[]> {

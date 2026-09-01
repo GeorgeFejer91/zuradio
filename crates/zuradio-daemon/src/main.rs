@@ -4,7 +4,9 @@ use clap::{Parser, Subcommand, ValueEnum};
 use serde::Serialize;
 use tracing_subscriber::EnvFilter;
 use zuradio_core::{Action, RepeatMode};
-use zuradio_daemon::{client, default_data_dir, default_remote_password_file, server};
+use zuradio_daemon::{
+    client, default_data_dir, default_library_dir, default_remote_password_file, server,
+};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -27,6 +29,13 @@ enum Command {
     Serve {
         #[arg(long = "music", value_name = "FOLDER")]
         music_roots: Vec<PathBuf>,
+        #[arg(
+            long = "library",
+            value_name = "FOLDER",
+            env = "ZURADIO_LIBRARY_DIR",
+            default_value_os_t = default_library_dir()
+        )]
+        library_root: PathBuf,
         #[arg(long, default_value_t = 0)]
         port: u16,
         #[arg(long, default_value = "web/dist")]
@@ -153,6 +162,7 @@ async fn main() -> anyhow::Result<()> {
     match cli.command {
         Command::Serve {
             music_roots,
+            library_root,
             port,
             web_root,
             no_open,
@@ -162,6 +172,7 @@ async fn main() -> anyhow::Result<()> {
             server::serve(server::ServeOptions {
                 data_dir: cli.data_dir,
                 music_roots,
+                library_root,
                 port,
                 web_root,
                 open_browser: !no_open,
@@ -217,7 +228,10 @@ fn action_from_command(command: Command) -> anyhow::Result<Action> {
         Command::Stop => Action::Stop,
         Command::Next => Action::Next,
         Command::Previous => Action::Previous,
-        Command::Seek { position_ms } => Action::Seek { position_ms },
+        Command::Seek { position_ms } => Action::Seek {
+            position_ms,
+            track_id: None,
+        },
         Command::Volume { value } => Action::SetVolume { volume: value },
         Command::Mute { enabled } => Action::SetMuted { muted: enabled },
         Command::Shuffle { enabled } => Action::SetShuffle { enabled },

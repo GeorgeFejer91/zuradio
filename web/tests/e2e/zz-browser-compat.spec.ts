@@ -14,12 +14,13 @@ if (!passwordPath) throw new Error("ZURADIO_TEST_PASSWORD_FILE must name the dae
 const password = fs.readFileSync(passwordPath, "utf8").replace(/[\r\n]+$/, "");
 const fixture = process.env.ZURADIO_UPLOAD_FIXTURE;
 const fixtureFolder = process.env.ZURADIO_UPLOAD_FOLDER;
+const selectionFolder = process.env.ZURADIO_UPLOAD_SELECTION_FOLDER ?? fixtureFolder;
 const expectedTitle = process.env.ZURADIO_UPLOAD_EXPECTED_TITLE ?? "Zuradio Upload Fixture";
 const companionBase = process.env.ZURADIO_COMPANION_BASE ?? "http://127.0.0.1:4173";
 
 test("plays laptop audio and selects folders and files for upload", async ({ browser, browserName }, testInfo) => {
   test.skip(!fixture || !fs.existsSync(fixture), "Set ZURADIO_UPLOAD_FIXTURE to a valid audio file");
-  test.skip(!fixtureFolder || !fs.existsSync(fixtureFolder), "Set ZURADIO_UPLOAD_FOLDER to an audio folder");
+  test.skip(!selectionFolder || !fs.existsSync(selectionFolder), "Set ZURADIO_UPLOAD_SELECTION_FOLDER to an audio folder");
   test.setTimeout(180_000);
 
   const hostBrowser = await chromium.launch({
@@ -57,7 +58,7 @@ test("plays laptop audio and selects folders and files for upload", async ({ bro
     expect(uploadConnectMs, `${browserName} listen-to-upload latency`).toBeLessThan(20_000);
     await expect(companion.getByRole("dialog")).toHaveCount(0);
 
-    await companion.locator("[data-upload-folder]").setInputFiles(fixtureFolder as string);
+    await companion.locator("[data-upload-folder]").setInputFiles(selectionFolder as string);
     await expect(companion.getByTestId("upload-selection")).toHaveText("3 files selected");
     await companion.locator("[data-upload-files]").setInputFiles(fixture as string);
     await expect(companion.getByTestId("upload-selection")).toHaveText("1 file selected");

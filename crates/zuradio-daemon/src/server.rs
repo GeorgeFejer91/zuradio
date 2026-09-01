@@ -52,6 +52,7 @@ const RENDEZVOUS_SALT: &[u8] = b"zuradio-rendezvous-v1|georgefejer91-zuradio";
 pub struct ServeOptions {
     pub data_dir: PathBuf,
     pub music_roots: Vec<PathBuf>,
+    pub library_root: PathBuf,
     pub port: u16,
     pub web_root: PathBuf,
     pub open_browser: bool,
@@ -71,6 +72,7 @@ struct AppState {
     remote_password: Option<Arc<str>>,
     device_trust_key: Option<Arc<[u8; 32]>>,
     uploads: Arc<Mutex<UploadManager>>,
+    library_root: Arc<PathBuf>,
     events: broadcast::Sender<AppSnapshot>,
 }
 
@@ -264,12 +266,12 @@ where
     F: Future<Output = ()> + Send + 'static,
 {
     fs::create_dir_all(&options.data_dir).context("creating Zuradio data folder")?;
-    let uploads = UploadManager::new(&options.data_dir)
+    let uploads = UploadManager::new(&options.data_dir, &options.library_root)
         .map_err(|error| anyhow::anyhow!("initializing upload repository: {error}"))?;
     let library_root = uploads.library_root().to_path_buf();
     let mut music_roots = options.music_roots;
     if !music_roots.contains(&library_root) {
-        music_roots.push(library_root);
+        music_roots.push(library_root.clone());
     }
     let remote_password = options
         .remote_password_file
@@ -297,8 +299,10 @@ where
         remote_password: remote_password.map(Arc::from),
         device_trust_key: device_trust_key.map(Arc::new),
         uploads: Arc::new(Mutex::new(uploads)),
+        library_root: Arc::new(library_root.clone()),
         events,
     };
+    tracing::info!(library = %library_root.display(), "Zuradio music library ready");
 
     let web_root = options
         .web_root
@@ -857,7 +861,6 @@ async fn remote_upload(
         remote.sequence,
         RemoteMode::Upload,
     )?;
-    let is_commit = matches!(&remote.operation, UploadOperation::Commit { .. });
     let uploads = Arc::clone(&state.uploads);
     let operation = remote.operation;
     let outcome = tokio::task::spawn_blocking(move || {
@@ -870,14 +873,15 @@ async fn remote_upload(
     .map_err(|_| upload_worker_error())?
     .map_err(|error| map_upload_error(&error))?;
 
-    let snapshot = if is_commit {
+    let catalogued_path = outcome.catalogued_path.clone();
+    let snapshot = if let Some(path) = catalogued_path {
         let core_state = Arc::clone(&state.core);
-        let roots = state.music_roots.as_ref().clone();
+        let library_root = Arc::clone(&state.library_root);
         let scanned = tokio::task::spawn_blocking(move || {
             core_state
                 .lock()
                 .map_err(|_| BlockingScanError::Lock)?
-                .scan(&roots)
+                .catalog_file(&path, &library_root)
                 .map_err(BlockingScanError::Core)
         })
         .await
@@ -888,8 +892,25 @@ async fn remote_upload(
             Err(BlockingScanError::Lock) => return Err(upload_worker_error()),
         };
         let _ = state.events.send(snapshot.clone());
+        if let Some(imported) = outcome.imported.first() {
+            tracing::info!(
+                transfer_id = %outcome.transfer_id,
+                title = %imported.title,
+                artist = %imported.artist,
+                "uploaded track catalogued"
+            );
+        }
         Some(snapshot)
     } else {
+        if outcome.status == "ready" {
+            tracing::info!(transfer_id = %outcome.transfer_id, "remote upload started");
+        } else if outcome.status == "committed" {
+            tracing::info!(
+                transfer_id = %outcome.transfer_id,
+                imported = outcome.imported.len(),
+                "remote upload completed"
+            );
+        }
         None
     };
     Ok(Json(RemoteUploadResponse { outcome, snapshot }))

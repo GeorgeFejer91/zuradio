@@ -92,6 +92,7 @@ export interface UploadProgress {
   fileCount: number;
   fileReceived: number;
   fileSize: number;
+  cataloguedCount: number;
 }
 
 export class HostBroadcastBridge {
@@ -553,13 +554,14 @@ export class CompanionBridge {
       control.addEventListener(
         "dataReceived",
         ((event: VDONinjaEvent<"dataReceived">) => {
-          if (!this.controlPeerUuid || event.detail.uuid !== this.controlPeerUuid) return;
+          if (this.control !== control || !this.controlPeerUuid || event.detail.uuid !== this.controlPeerUuid) return;
           void this.handleControlMessage(event.detail.data);
         }) as EventListener,
       );
       control.addEventListener(
         "dataChannelOpen",
         ((event: VDONinjaEvent<"dataChannelOpen">) => {
+          if (this.control !== control) return;
           this.controlPeerUuid ??= event.detail.uuid;
           if (event.detail.uuid === this.controlPeerUuid) void this.sendHello(invitation);
         }) as EventListener,
@@ -645,6 +647,7 @@ export class CompanionBridge {
       fileId: `file-${crypto.randomUUID()}`,
       relativePath: file.webkitRelativePath || file.name,
     }));
+    let cataloguedCount = 0;
     await this.sendUpload({
       kind: "begin",
       transferId,
@@ -671,13 +674,23 @@ export class CompanionBridge {
             fileCount: entries.length,
             fileReceived: offset + chunk.length,
             fileSize: bytes.length,
+            cataloguedCount,
           });
         }
-        await this.sendUpload({
+        const finished = await this.sendUpload({
           kind: "finish_file",
           transferId,
           fileId: entry.fileId,
           sha256: digest,
+        });
+        cataloguedCount += finished.outcome.imported.length;
+        onProgress({
+          fileName: entry.relativePath,
+          fileIndex,
+          fileCount: entries.length,
+          fileReceived: bytes.length,
+          fileSize: bytes.length,
+          cataloguedCount,
         });
       }
       const committed = await this.sendUpload({ kind: "commit", transferId });
@@ -957,16 +970,22 @@ export class CompanionBridge {
     listen.addEventListener(
       "track",
       ((event: VDONinjaEvent<"track">) => {
+        if (this.listen !== listen) return;
         if (event.detail.track.kind !== "audio") return;
         const stream = new MediaStream([event.detail.track]);
         this.audio.srcObject = stream;
         this.attachAudioAnalysis(stream);
-        void this.audio.play().catch(() => this.callbacks.onStatus("Tap play to hear the live stream"));
+        void this.audio.play().catch(() => {
+          if (this.listen === listen && this.requestedMode !== "upload") {
+            this.callbacks.onStatus("Tap play to hear the live stream");
+          }
+        });
       }) as EventListener,
     );
     listen.addEventListener(
       "dataReceived",
       ((event: VDONinjaEvent<"dataReceived">) => {
+        if (this.listen !== listen) return;
         const message = parseMessage(event.detail.data);
         if (message?.type === "zuradio.state" && isPublicState(message.state)) {
           this.callbacks.onNowPlaying(message.state);

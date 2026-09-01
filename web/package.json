@@ -10,6 +10,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:ui": "playwright test",
+    "test:transfer": "ZURADIO_TRANSFER_GATE=1 playwright test tests/e2e/data-transfer.spec.ts --project=chromium",
     "upload": "node scripts/upload-cli.mjs",
     "preview": "vite preview"
   },

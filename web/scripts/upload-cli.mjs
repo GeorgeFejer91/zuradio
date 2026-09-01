@@ -58,6 +58,7 @@ async function upload(options) {
     await page.goto(publicUrl, { waitUntil: "domcontentloaded", timeout: options.timeoutMs });
     await page.getByTestId("connect-upload").click();
     await page.getByTestId("password").fill(password);
+    const connectionStarted = performance.now();
     await page.getByTestId("connect").click();
     try {
       await page.getByText("Upload connected", { exact: true }).waitFor({ timeout: options.timeoutMs });
@@ -65,6 +66,7 @@ async function upload(options) {
       const alert = await page.getByRole("alert").textContent().catch(() => "");
       throw new Error(alert?.trim() || browserErrors.at(-1) || messageOf(error));
     }
+    const connectionMs = Math.round(performance.now() - connectionStarted);
 
     const picker = target.kind === "folder" ? page.locator("[data-upload-folder]") : page.locator("[data-upload-files]");
     await picker.setInputFiles(target.kind === "folder" ? target.path : target.paths);
@@ -74,6 +76,8 @@ async function upload(options) {
       throw new Error("the selected path contains no supported audio files");
     }
 
+    const sourceBytes = uploadPaths(target).reduce((total, filePath) => total + fs.statSync(filePath).size, 0);
+    const uploadStarted = performance.now();
     await page.getByTestId("upload").click();
     const completion = page.getByTestId("upload-progress").filter({ hasText: /tracks? added to the laptop library/i });
     await completion.waitFor({ timeout: options.timeoutMs });
@@ -85,11 +89,16 @@ async function upload(options) {
       })),
     );
     if (browserErrors.length > 0) throw new Error(browserErrors.join(" | "));
+    const uploadMs = Math.max(1, Math.round(performance.now() - uploadStarted));
     return {
       status: "uploaded",
       source: target.kind,
       selectedFiles: selectedCount,
       importedTracks: imported.length,
+      sourceBytes,
+      connectionMs,
+      uploadMs,
+      bytesPerSecond: Math.round(sourceBytes / (uploadMs / 1_000)),
       message: completionText,
       imported,
     };
@@ -165,6 +174,24 @@ function resolveRequiredFile(value, label) {
     throw new Error(`${label} does not exist: ${resolved}`);
   }
   return resolved;
+}
+
+function uploadPaths(target) {
+  if (target.kind === "files") return target.paths;
+  const files = [];
+  const pending = [target.path];
+  while (pending.length > 0) {
+    const directory = pending.pop();
+    for (const entry of fs.readdirSync(directory, { withFileTypes: true })) {
+      const entryPath = path.join(directory, entry.name);
+      if (entry.isDirectory()) {
+        pending.push(entryPath);
+      } else if (entry.isFile() && SUPPORTED_EXTENSIONS.has(path.extname(entry.name).toLocaleLowerCase())) {
+        files.push(entryPath);
+      }
+    }
+  }
+  return files;
 }
 
 function validateCompanionUrl(value) {

@@ -42,6 +42,11 @@ pub fn run() {
                 .path()
                 .audio_dir()
                 .map_or_else(|_| Vec::new(), |path| vec![path]);
+            let library_root = music_roots
+                .first()
+                .map_or_else(zuradio_daemon::default_library_dir, |path| {
+                    path.join("Zuradio Library")
+                });
             let startup_shutdown = shutdown.clone();
 
             tauri::async_runtime::spawn(async move {
@@ -55,6 +60,7 @@ pub fn run() {
                 let options = ServeOptions {
                     data_dir,
                     music_roots,
+                    library_root,
                     port: 0,
                     web_root,
                     open_browser: false,

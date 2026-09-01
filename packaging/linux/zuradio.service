@@ -4,7 +4,7 @@ After=network-online.target graphical-session.target
 
 [Service]
 Type=simple
-ExecStart=%h/.local/lib/zuradio/zuradio --data-dir %h/.local/share/zuradio serve --music %h/Musik --web-root %h/.local/lib/zuradio/web --no-open --companion-url https://georgefejer91.github.io/zuradio
+ExecStart=%h/.local/lib/zuradio/zuradio --data-dir %h/.local/share/zuradio serve --music %h/Musik --library "%h/Musik/Zuradio Library" --web-root %h/.local/lib/zuradio/web --no-open --companion-url https://georgefejer91.github.io/zuradio
 Restart=on-failure
 RestartSec=3
 UMask=0077
@@ -13,7 +13,7 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectHome=read-only
 ReadOnlyPaths=%h/Musik %h/.local/lib/zuradio
-ReadWritePaths=%h/.local/share/zuradio
+ReadWritePaths=%h/.local/share/zuradio "%h/Musik/Zuradio Library"
 RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
 LockPersonality=yes
 MemoryDenyWriteExecute=yes

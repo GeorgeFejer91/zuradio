@@ -33,10 +33,11 @@ the stream unavailable.
 - A read-only listener UI, a controller UI with player, queue, favorite, and
   playlist controls, and a folder/file upload UI that writes directly to this
   laptop rather than GitHub Pages.
-- A managed local repository under the Zuradio data directory. Uploads are
-  integrity-checked, classified from embedded tags plus folder/file names, and
-  organized by artist, album, year, track, and title. Metadata can be corrected
-  from the desktop UI and those overrides survive rescans.
+- A visible managed repository at `Zuradio Library` inside the computer's Music
+  folder. Uploads are integrity-checked, classified from embedded tags plus
+  folder/file names, and organized by artist, album, year, track, and title.
+  Metadata can be corrected from the desktop UI and those overrides survive
+  rescans.
 - Real WebRTC audio and data channels through `@vdoninja/sdk` 1.5.5. VDO.Ninja
   transports packets; Rust independently proves and authorizes controllers.
 
@@ -135,10 +136,15 @@ enabled; ordinary development browser tabs may still require one playback
 gesture under their autoplay policy.
 
 Authorized Upload mode accepts individual files or a browser-selected folder.
-Files are transferred sequentially over the encrypted live data bridge,
-checked with SHA-256, staged until the whole batch validates, and then moved to
-`~/.local/share/zuradio/library/`. Upload limits are 512 files, 512 MiB per file,
-and 16 GiB per batch. See [the upload protocol](docs/upload-protocol.md).
+Files are transferred sequentially over the encrypted live data bridge and
+checked with SHA-256. Each completed file is moved immediately into
+`Zuradio Library` inside the computer's Music folder, catalogued incrementally,
+and pushed into every open library view without waiting for the rest of the
+selection. While this happens, the local app shows the current incoming file,
+acknowledged bytes and percentage, and how many tracks are already catalogued;
+it then reports completion or interruption. Private partial files remain under
+Zuradio app data. Upload limits are 512 files, 512 MiB per file, and 16 GiB per selection. See
+[the upload protocol](docs/upload-protocol.md).
 
 An external program or Codex agent can use the same browser bridge through the
 machine-readable upload command. It accepts repeated individual files or one
@@ -154,10 +160,11 @@ npm run upload -- --password-file "/path/to/zuradio.txt" --folder "/path/to/musi
 
 The command defaults to the public companion, can target another deployment
 with `--url`, and can use an installed Chrome or Brave binary with
-`--browser-executable`. It prints JSON describing the selected and imported
-tracks, so automation can verify the result. The browser remains only a secure
-transport client; files still travel directly to the active laptop and are
-never stored by GitHub Pages.
+`--browser-executable`. It prints JSON describing the selected/imported tracks,
+source byte count, connection time, upload duration, and transfer rate, so
+automation can verify the result. The browser remains only a secure transport
+client; files still travel directly to the active laptop and are never stored
+by GitHub Pages.
 
 ## Broadcast to a phone
 

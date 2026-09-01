@@ -83,7 +83,9 @@ root.addEventListener("click", (event) => {
 
 root.addEventListener("input", (event) => {
   const input = event.target as HTMLInputElement;
-  if (input.matches("[data-search]")) {
+  if (input.matches("[data-upload-files], [data-upload-folder]")) {
+    selectUploads(input);
+  } else if (input.matches("[data-search]")) {
     search = input.value;
     render();
   } else if (input.matches("[data-playlist-search]")) {
@@ -95,13 +97,16 @@ root.addEventListener("input", (event) => {
 root.addEventListener("change", (event) => {
   const input = event.target as HTMLInputElement;
   if (input.matches("[data-volume]")) void send({ kind: "set_volume", volume: Number(input.value) });
-  if (input.matches("[data-seek]")) void send({ kind: "seek", positionMs: Number(input.value) });
+  if (input.matches("[data-seek]") && snapshot?.player.currentTrackId) {
+    void send({
+      kind: "seek",
+      positionMs: Number(input.value),
+      trackId: snapshot.player.currentTrackId,
+    });
+  }
   if (input.matches("[data-stream-volume]")) audio.volume = Number(input.value) / 100;
   if (input.matches("[data-upload-files], [data-upload-folder]")) {
-    selectedFiles = Array.from(input.files ?? []).filter(isSupportedUpload);
-    importedFiles = [];
-    uploadProgress = "";
-    render();
+    selectUploads(input);
   }
 });
 
@@ -341,7 +346,10 @@ async function uploadSelectedFiles(): Promise<void> {
   try {
     const outcome = await bridge.uploadFiles(selectedFiles, (progress) => {
       const percent = Math.round((progress.fileReceived / progress.fileSize) * 100);
-      uploadProgress = `${progress.fileIndex + 1}/${progress.fileCount} · ${progress.fileName} · ${percent}%`;
+      const catalogued = progress.cataloguedCount
+        ? ` · ${progress.cataloguedCount} catalogued on laptop`
+        : "";
+      uploadProgress = `${progress.fileIndex + 1}/${progress.fileCount} · ${progress.fileName} · ${percent}%${catalogued}`;
       render();
     });
     importedFiles = outcome.imported;
@@ -528,8 +536,11 @@ function renderController(state: AppSnapshot): string {
 
 function renderLibrary(state: AppSnapshot): string {
   const query = search.trim().toLocaleLowerCase();
-  const tracks = state.tracks.filter((track) =>
-    !query || [track.title, track.artist, track.album].some((value) => value.toLocaleLowerCase().includes(query)),
+  const tracks = state.tracks.filter(
+    (track) =>
+      track.available &&
+      (!query ||
+        [track.title, track.artist, track.album].some((value) => value.toLocaleLowerCase().includes(query))),
   );
   const selected = state.playlists.find((playlist) => playlist.id === selectedPlaylistId) ?? state.playlists[0];
   return `<div class="controller-view-header"><div><h2>Library</h2><span>${tracks.length} track${tracks.length === 1 ? "" : "s"}</span></div><label class="toolbar-search">${icon("library")}<input class="search" data-search type="search" value="${escapeAttribute(search)}" placeholder="Search library" aria-label="Search library" /></label></div>
@@ -568,8 +579,11 @@ function renderPlaylists(state: AppSnapshot): string {
   if (selected) selectedPlaylistId = selected.id;
   const byId = new Map(state.tracks.map((track) => [track.id, track]));
   const query = playlistSearch.trim().toLocaleLowerCase();
-  const availableTracks = state.tracks.filter((track) =>
-    !query || [track.title, track.artist, track.album].some((value) => value.toLocaleLowerCase().includes(query)),
+  const availableTracks = state.tracks.filter(
+    (track) =>
+      track.available &&
+      (!query ||
+        [track.title, track.artist, track.album].some((value) => value.toLocaleLowerCase().includes(query))),
   );
   return `<div class="playlist-library" data-testid="playlist-library">
     <div class="playlist-library-header"><div><span class="eyebrow">Saved on laptop</span><h2>Playlist library</h2></div><span class="playlist-total">${state.playlists.length}</span></div>
@@ -650,6 +664,15 @@ function messageOf(error: unknown): string {
 
 function isSupportedUpload(file: File): boolean {
   return isSupportedAudioFileName(file.name);
+}
+
+function selectUploads(input: HTMLInputElement): void {
+  const files = Array.from(input.files ?? []).filter(isSupportedUpload);
+  if (!files.length) return;
+  selectedFiles = files;
+  importedFiles = [];
+  uploadProgress = "";
+  render();
 }
 
 window.addEventListener("pagehide", () => {

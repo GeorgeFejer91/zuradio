@@ -155,6 +155,10 @@ test("uploads an individual file through the external browser CLI", async ({ bro
       source: string;
       selectedFiles: number;
       importedTracks: number;
+      sourceBytes: number;
+      connectionMs: number;
+      uploadMs: number;
+      bytesPerSecond: number;
     };
     expect(result).toMatchObject({
       status: "uploaded",
@@ -162,6 +166,10 @@ test("uploads an individual file through the external browser CLI", async ({ bro
       selectedFiles: 1,
       importedTracks: 1,
     });
+    expect(result.sourceBytes).toBe(fs.statSync(fixture as string).size);
+    expect(result.connectionMs).toBeLessThan(30_000);
+    expect(result.uploadMs).toBeGreaterThan(0);
+    expect(result.bytesPerSecond).toBeGreaterThan(32 * 1024);
   } finally {
     await stopBroadcast(host);
   }
@@ -180,10 +188,16 @@ test("selects a folder, ignores non-audio files, and imports every track", async
     await uploader.getByTestId("password").fill(password);
     await uploader.getByTestId("connect").click();
     await expect(uploader.getByText("Upload connected", { exact: true })).toBeVisible({ timeout: 45_000 });
+    await host.getByRole("button", { name: /Library/ }).click();
+    const hostTrackCount = await host.locator("[data-track-row]").count();
     await uploader.locator("[data-upload-folder]").setInputFiles(fixtureFolder as string);
     await expect(uploader.getByText("3 files selected", { exact: true })).toBeVisible();
     await uploader.screenshot({ path: "test-results/mobile-upload-folder-selection.png", fullPage: true });
     await uploader.getByTestId("upload").click();
+    await expect(uploader.getByTestId("upload-progress")).toContainText("1 catalogued on laptop", {
+      timeout: 90_000,
+    });
+    await expect.poll(() => host.locator("[data-track-row]").count()).toBeGreaterThan(hostTrackCount);
     await expect(uploader.getByText(/3 tracks added to the laptop library/)).toBeVisible({ timeout: 180_000 });
     await expect(uploader.locator(".imported-list li")).toHaveCount(3);
   } finally {

@@ -23,7 +23,7 @@ const hostState = await host.evaluate(async () => ({
   hasWebRtc: typeof RTCPeerConnection === "function",
   audioState: new AudioContext().state,
   broadcastActive: Boolean(await (await fetch("/api/v1/broadcast")).json()),
-  trackCount: (await (await fetch("/api/v1/snapshot")).json()).tracks.length,
+  trackCount: (await (await fetch("/api/v1/snapshot")).json()).tracks.filter((track) => track.available).length,
 }));
 if (!hostState.hasWebRtc) throw new Error("The installed desktop shell has no WebRTC engine");
 if (hostState.audioState !== "running") throw new Error("The installed desktop audio graph is autoplay-blocked");

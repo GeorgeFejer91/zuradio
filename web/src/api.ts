@@ -4,6 +4,7 @@ import type {
   ActionResult,
   AppSnapshot,
   BroadcastSession,
+  RemoteUploadResponse,
   WireErrorShape,
 } from "./types";
 
@@ -36,16 +37,14 @@ export class ZuradioApi {
         method: "POST",
         body: JSON.stringify({ token }),
       });
-      this.snapshotValue = response.snapshot;
-      return response.snapshot;
+      return this.acceptSnapshot(response.snapshot);
     }
     return this.snapshot();
   }
 
   async snapshot(): Promise<AppSnapshot> {
     const snapshot = await this.request<AppSnapshot>("/api/v1/snapshot");
-    this.snapshotValue = snapshot;
-    return snapshot;
+    return this.acceptSnapshot(snapshot);
   }
 
   async scan(roots: string[] = []): Promise<AppSnapshot> {
@@ -53,8 +52,7 @@ export class ZuradioApi {
       method: "POST",
       body: JSON.stringify({ roots }),
     });
-    this.snapshotValue = snapshot;
-    return snapshot;
+    return this.acceptSnapshot(snapshot);
   }
 
   async action(action: Action): Promise<ActionResult> {
@@ -63,7 +61,7 @@ export class ZuradioApi {
     const request: ActionRequest = {
       protocol: 1,
       commandId: crypto.randomUUID(),
-      expectedRevision: current.revision,
+      expectedRevision: null,
       actor: { role: "local", peerId: null },
       action,
     };
@@ -108,12 +106,12 @@ export class ZuradioApi {
     return result;
   }
 
-  async remoteUpload(payload: unknown): Promise<unknown> {
-    const result = await this.request<unknown>("/api/v1/remote/upload", {
+  async remoteUpload(payload: unknown): Promise<RemoteUploadResponse> {
+    const result = await this.request<RemoteUploadResponse>("/api/v1/remote/upload", {
       method: "POST",
       body: JSON.stringify(payload),
     });
-    await this.snapshot();
+    if (result.snapshot) this.acceptSnapshot(result.snapshot);
     return result;
   }
 
@@ -125,6 +123,7 @@ export class ZuradioApi {
     socket.addEventListener("message", (event) => {
       try {
         const snapshot = JSON.parse(String(event.data)) as AppSnapshot;
+        if (this.snapshotValue && snapshot.revision <= this.snapshotValue.revision) return;
         this.snapshotValue = snapshot;
         listener(snapshot);
       } catch {
@@ -143,6 +142,14 @@ export class ZuradioApi {
 
   artworkUrl(trackId: string): string {
     return `/api/v1/artwork/${encodeURIComponent(trackId)}`;
+  }
+
+  private acceptSnapshot(snapshot: AppSnapshot): AppSnapshot {
+    if (!this.snapshotValue || snapshot.revision >= this.snapshotValue.revision) {
+      this.snapshotValue = snapshot;
+      return snapshot;
+    }
+    return this.snapshotValue;
   }
 
   private async request<T>(path: string, init: RequestInit = {}): Promise<T> {

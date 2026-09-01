@@ -1,5 +1,7 @@
 import type { AppSnapshot, PlayerState } from "./types";
 
+const LOCAL_SEEK_INTENT_MS = 5_000;
+
 export class AudioEngine {
   readonly element: HTMLAudioElement;
   private context: AudioContext | null = null;
@@ -8,20 +10,25 @@ export class AudioEngine {
   private analyserData: Uint8Array<ArrayBuffer> | null = null;
   private broadcastDestination: MediaStreamAudioDestinationNode | null = null;
   private loadedTrackId: string | null = null;
+  private canonicalTrackId: string | null = null;
+  private canonicalPositionMs: number | null = null;
+  private pendingPositionMs: number | null = null;
+  private localSeekIntent: { trackId: string; positionMs: number; expiresAt: number } | null = null;
   private gestureUnlocked = false;
 
   constructor(
     private readonly mediaUrl: (trackId: string) => string,
     onEnded: () => void,
     onError: (message: string) => void,
-    onTime: (milliseconds: number) => void,
+    private readonly onTime: (milliseconds: number) => void,
   ) {
     this.element = document.createElement("audio");
     this.element.preload = "auto";
     this.element.crossOrigin = "use-credentials";
     this.element.addEventListener("ended", onEnded);
     this.element.addEventListener("error", () => onError("The current track could not be played."));
-    this.element.addEventListener("timeupdate", () => onTime(Math.round(this.element.currentTime * 1000)));
+    this.element.addEventListener("loadedmetadata", () => this.applyPendingPosition());
+    this.element.addEventListener("timeupdate", () => this.onTime(Math.round(this.element.currentTime * 1000)));
     document.body.append(this.element);
   }
 
@@ -44,10 +51,18 @@ export class AudioEngine {
     return true;
   }
 
-  async sync(snapshot: AppSnapshot): Promise<void> {
+  async sync(snapshot: AppSnapshot, options: { forcePosition?: boolean } = {}): Promise<void> {
     const state = snapshot.player;
-    if (state.currentTrackId !== this.loadedTrackId) {
+    const trackChanged = state.currentTrackId !== this.loadedTrackId;
+    const canonicalPositionChanged =
+      state.currentTrackId !== this.canonicalTrackId || state.positionMs !== this.canonicalPositionMs;
+    this.canonicalTrackId = state.currentTrackId;
+    this.canonicalPositionMs = state.positionMs;
+
+    if (trackChanged) {
       this.loadedTrackId = state.currentTrackId;
+      this.pendingPositionMs = null;
+      if (this.localSeekIntent?.trackId !== state.currentTrackId) this.localSeekIntent = null;
       this.element.pause();
       if (state.currentTrackId) {
         this.element.src = this.mediaUrl(state.currentTrackId);
@@ -58,14 +73,28 @@ export class AudioEngine {
       }
     }
     this.applyVolume(state);
-    const targetSeconds = state.positionMs / 1000;
-    if (
-      state.currentTrackId &&
-      Number.isFinite(this.element.duration) &&
-      Math.abs(this.element.currentTime - targetSeconds) > 2.5
-    ) {
-      this.element.currentTime = Math.min(targetSeconds, this.element.duration || targetSeconds);
+
+    let shouldApplyPosition =
+      Boolean(state.currentTrackId) && (trackChanged || canonicalPositionChanged || options.forcePosition === true);
+    if (this.localSeekIntent && state.currentTrackId === this.localSeekIntent.trackId) {
+      if (state.positionMs === this.localSeekIntent.positionMs) {
+        this.localSeekIntent = null;
+        shouldApplyPosition = true;
+      } else if (performance.now() < this.localSeekIntent.expiresAt) {
+        shouldApplyPosition = false;
+      } else {
+        this.localSeekIntent = null;
+      }
+    } else if (this.localSeekIntent) {
+      this.localSeekIntent = null;
     }
+    if (state.currentTrackId && shouldApplyPosition) {
+      this.applyPosition(state.positionMs);
+    } else if (!state.currentTrackId && trackChanged) {
+      this.pendingPositionMs = null;
+      this.onTime(0);
+    }
+
     if (state.status === "playing" && state.currentTrackId && this.gestureUnlocked) {
       try {
         await this.element.play();
@@ -80,7 +109,17 @@ export class AudioEngine {
 
   seek(milliseconds: number): void {
     if (!this.loadedTrackId) return;
-    this.element.currentTime = Math.max(0, milliseconds / 1000);
+    const positionMs = Math.max(0, milliseconds);
+    this.localSeekIntent = {
+      trackId: this.loadedTrackId,
+      positionMs,
+      expiresAt: performance.now() + LOCAL_SEEK_INTENT_MS,
+    };
+    this.applyPosition(positionMs);
+  }
+
+  cancelLocalSeek(): void {
+    this.localSeekIntent = null;
   }
 
   destroy(): void {
@@ -94,6 +133,27 @@ export class AudioEngine {
     this.analyser = null;
     this.analyserData = null;
     this.broadcastDestination = null;
+    this.pendingPositionMs = null;
+    this.localSeekIntent = null;
+  }
+
+  private applyPendingPosition(): void {
+    if (this.pendingPositionMs !== null) this.applyPosition(this.pendingPositionMs);
+  }
+
+  private applyPosition(milliseconds: number): void {
+    const requestedMs = Math.max(0, milliseconds);
+    this.pendingPositionMs = requestedMs;
+    this.onTime(requestedMs);
+    if (!Number.isFinite(this.element.duration)) return;
+    const durationMs = Math.max(0, this.element.duration * 1000);
+    const positionMs = Math.min(requestedMs, durationMs || requestedMs);
+    const targetSeconds = positionMs / 1000;
+    if (Math.abs(this.element.currentTime - targetSeconds) > 0.15) {
+      this.element.currentTime = targetSeconds;
+    }
+    this.pendingPositionMs = null;
+    this.onTime(positionMs);
   }
 
   private ensureGraph(): void {

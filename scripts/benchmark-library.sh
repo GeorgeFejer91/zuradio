@@ -23,8 +23,9 @@ mkdir -p "$project_dir/target"
 benchmark_dir=$(mktemp -d "$project_dir/target/zuradio-benchmark.XXXXXX")
 data_dir="$benchmark_dir/data"
 corpus_dir="$benchmark_dir/corpus"
+library_dir="$benchmark_dir/library"
 password_file="$benchmark_dir/password.txt"
-mkdir -p "$data_dir" "$corpus_dir"
+mkdir -p "$data_dir" "$corpus_dir" "$library_dir"
 printf 'zuradio-performance-password\n' >"$password_file"
 chmod 0600 "$password_file"
 server_pid=
@@ -51,6 +52,7 @@ track_count=$((copies * 3))
 
 "$binary" --data-dir "$data_dir" serve \
   --music "$corpus_dir" \
+  --library "$library_dir" \
   --web-root "$project_dir/web/dist" \
   --no-open \
   --remote-password-file "$password_file" >/dev/null 2>&1 &

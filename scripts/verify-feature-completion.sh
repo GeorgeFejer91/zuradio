@@ -27,5 +27,6 @@ if [ -z "${ZURADIO_TEST_PASSWORD_FILE:-}" ]; then
   export ZURADIO_TEST_PASSWORD_FILE
 fi
 
-"$project_dir/scripts/qualify-browser.sh" "$@"
+"$project_dir/scripts/verify-data-transfer.sh"
+ZURADIO_TRANSFER_GATE=0 "$project_dir/scripts/qualify-browser.sh" "$@"
 printf 'Zuradio browser verification gate passed.\n'

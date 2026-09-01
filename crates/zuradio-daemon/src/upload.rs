@@ -68,6 +68,8 @@ pub(crate) struct UploadOutcome {
     pub(crate) file_id: Option<String>,
     pub(crate) received: Option<u64>,
     pub(crate) imported: Vec<ImportedFile>,
+    #[serde(skip)]
+    pub(crate) catalogued_path: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize)]
@@ -117,6 +119,7 @@ struct UploadFile {
 struct UploadBatch {
     directory: PathBuf,
     files: HashMap<String, UploadFile>,
+    imported: Vec<ImportedFile>,
 }
 
 #[derive(Debug)]
@@ -127,14 +130,18 @@ pub(crate) struct UploadManager {
 }
 
 impl UploadManager {
-    pub(crate) fn new(data_dir: &Path) -> Result<Self, UploadError> {
+    pub(crate) fn new(data_dir: &Path, library_root: &Path) -> Result<Self, UploadError> {
         let staging_root = data_dir.join("uploads");
-        let library_root = data_dir.join("library");
         fs::create_dir_all(&staging_root)?;
-        fs::create_dir_all(&library_root)?;
+        remove_abandoned_staging(&staging_root)?;
+        fs::create_dir_all(library_root)?;
+        let legacy_library = data_dir.join("library");
+        if legacy_library != library_root {
+            migrate_legacy_library(&legacy_library, library_root)?;
+        }
         Ok(Self {
             staging_root,
-            library_root,
+            library_root: library_root.to_path_buf(),
             batches: HashMap::new(),
         })
     }
@@ -224,6 +231,7 @@ impl UploadManager {
             UploadBatch {
                 directory,
                 files: entries,
+                imported: Vec::new(),
             },
         );
         Ok(outcome("ready", transfer_id, None, None, Vec::new()))
@@ -286,6 +294,7 @@ impl UploadManager {
         {
             return Err(UploadError::Invalid);
         }
+        let library_root = self.library_root.clone();
         let batch = self
             .batches
             .get_mut(transfer_id)
@@ -303,13 +312,21 @@ impl UploadManager {
             return Err(UploadError::Integrity);
         }
         entry.digest = Some(actual);
-        Ok(outcome(
-            "verified",
+        let prepared = prepare_import(&library_root, entry)?;
+        commit_prepared(&prepared)?;
+        let imported = prepared.imported.clone();
+        let destination = prepared.destination.clone();
+        let received = entry.received;
+        batch.imported.push(imported.clone());
+        let mut result = outcome(
+            "catalogued",
             transfer_id.to_owned(),
             Some(file_id.to_owned()),
-            Some(entry.received),
-            Vec::new(),
-        ))
+            Some(received),
+            vec![imported],
+        );
+        result.catalogued_path = Some(destination);
+        Ok(result)
     }
 
     fn commit(&mut self, transfer_id: &str) -> Result<UploadOutcome, UploadError> {
@@ -321,37 +338,13 @@ impl UploadManager {
             self.batches.insert(transfer_id.to_owned(), batch);
             return Err(UploadError::Integrity);
         }
-        let prepared = batch
-            .files
-            .values()
-            .map(|entry| prepare_import(&self.library_root, entry))
-            .collect::<Result<Vec<_>, _>>();
-        let prepared = match prepared {
-            Ok(value) => value,
-            Err(error) => {
-                let _ = fs::remove_dir_all(&batch.directory);
-                return Err(error);
-            }
-        };
-        let mut imported = Vec::with_capacity(prepared.len());
-        for item in prepared {
-            if let Some(parent) = item.destination.parent() {
-                fs::create_dir_all(parent)?;
-            }
-            if item.destination.exists() {
-                fs::remove_file(&item.staged_path)?;
-            } else {
-                fs::rename(&item.staged_path, &item.destination)?;
-            }
-            imported.push(item.imported);
-        }
         let _ = fs::remove_dir(&batch.directory);
         Ok(outcome(
             "committed",
             transfer_id.to_owned(),
             None,
             None,
-            imported,
+            batch.imported,
         ))
     }
 
@@ -370,6 +363,66 @@ impl UploadManager {
             Vec::new(),
         ))
     }
+}
+
+fn remove_abandoned_staging(staging_root: &Path) -> Result<(), UploadError> {
+    for entry in fs::read_dir(staging_root)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        if file_type.is_dir() && !file_type.is_symlink() {
+            fs::remove_dir_all(entry.path())?;
+        } else {
+            fs::remove_file(entry.path())?;
+        }
+    }
+    Ok(())
+}
+
+fn migrate_legacy_library(source: &Path, destination: &Path) -> Result<(), UploadError> {
+    if !source.is_dir() {
+        return Ok(());
+    }
+    for entry in fs::read_dir(source)? {
+        let entry = entry?;
+        let file_type = entry.file_type()?;
+        let source_path = entry.path();
+        let destination_path = destination.join(entry.file_name());
+        if file_type.is_dir() {
+            fs::create_dir_all(&destination_path)?;
+            migrate_legacy_library(&source_path, &destination_path)?;
+        } else if file_type.is_file() {
+            let available = available_migration_path(&destination_path)?;
+            if fs::rename(&source_path, &available).is_err() {
+                fs::copy(&source_path, &available)?;
+                fs::remove_file(&source_path)?;
+            }
+        }
+    }
+    let _ = fs::remove_dir(source);
+    Ok(())
+}
+
+fn available_migration_path(preferred: &Path) -> Result<PathBuf, UploadError> {
+    if !preferred.exists() {
+        return Ok(preferred.to_path_buf());
+    }
+    let parent = preferred.parent().ok_or(UploadError::Storage)?;
+    let stem = preferred
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("track");
+    let extension = preferred.extension().and_then(|value| value.to_str());
+    for sequence in 1..=10_000 {
+        let name = extension.map_or_else(
+            || format!("{stem} [migrated-{sequence}]"),
+            |value| format!("{stem} [migrated-{sequence}].{value}"),
+        );
+        let candidate = parent.join(name);
+        if !candidate.exists() {
+            return Ok(candidate);
+        }
+    }
+    Err(UploadError::Storage)
 }
 
 fn validate_spec(spec: &UploadFileSpec) -> Result<(), UploadError> {
@@ -428,6 +481,18 @@ struct PreparedImport {
     imported: ImportedFile,
     staged_path: PathBuf,
     destination: PathBuf,
+}
+
+fn commit_prepared(item: &PreparedImport) -> Result<(), UploadError> {
+    if let Some(parent) = item.destination.parent() {
+        fs::create_dir_all(parent)?;
+    }
+    if item.destination.exists() {
+        fs::remove_file(&item.staged_path)?;
+    } else {
+        fs::rename(&item.staged_path, &item.destination)?;
+    }
+    Ok(())
 }
 
 fn prepare_import(library_root: &Path, entry: &UploadFile) -> Result<PreparedImport, UploadError> {
@@ -612,6 +677,7 @@ fn outcome(
         file_id,
         received,
         imported,
+        catalogued_path: None,
     }
 }
 
@@ -661,7 +727,8 @@ mod tests {
     #[test]
     fn enforces_order_size_and_digest() -> Result<(), UploadError> {
         let directory = tempdir().map_err(|_| UploadError::Storage)?;
-        let mut manager = UploadManager::new(directory.path())?;
+        let library = directory.path().join("library");
+        let mut manager = UploadManager::new(directory.path(), &library)?;
         let transfer = "transfer-12345678";
         let file = "file-12345678";
         manager.execute(UploadOperation::Begin {
@@ -715,5 +782,105 @@ mod tests {
         assert_eq!(inferred.year, Some(2024));
         assert_eq!(inferred.track_number, Some(3));
         Ok(())
+    }
+
+    #[test]
+    fn catalogues_each_finished_file_into_the_visible_library() -> Result<(), UploadError> {
+        let directory = tempdir().map_err(|_| UploadError::Storage)?;
+        let library = directory.path().join("Music/Zuradio Library");
+        let mut manager = UploadManager::new(directory.path(), &library)?;
+        let transfer = "transfer-immediate";
+        let file = "file-immediate";
+        let bytes = minimal_wav();
+        manager.execute(UploadOperation::Begin {
+            transfer_id: transfer.into(),
+            files: vec![UploadFileSpec {
+                file_id: file.into(),
+                relative_path: "Example Artist/Example Album (2024)/01 - Example Song.wav".into(),
+                size: u64::try_from(bytes.len()).map_err(|_| UploadError::TooLarge)?,
+            }],
+        })?;
+        manager.execute(UploadOperation::Chunk {
+            transfer_id: transfer.into(),
+            file_id: file.into(),
+            offset: 0,
+            data: STANDARD.encode(&bytes),
+        })?;
+        let digest = encode_hex(&Sha256::digest(&bytes));
+        let finished = manager.execute(UploadOperation::FinishFile {
+            transfer_id: transfer.into(),
+            file_id: file.into(),
+            sha256: digest,
+        })?;
+
+        assert_eq!(finished.status, "catalogued");
+        assert_eq!(finished.imported.len(), 1);
+        let path = finished.catalogued_path.ok_or(UploadError::Storage)?;
+        assert!(path.is_file());
+        assert!(path.starts_with(&library));
+
+        manager.revoke_all();
+        assert!(path.is_file(), "a completed file must survive session loss");
+        Ok(())
+    }
+
+    #[test]
+    fn migrates_legacy_managed_files_out_of_hidden_app_data() -> Result<(), UploadError> {
+        let directory = tempdir().map_err(|_| UploadError::Storage)?;
+        let legacy = directory.path().join("library/Artist/Album/01 - Song.mp3");
+        fs::create_dir_all(legacy.parent().ok_or(UploadError::Storage)?)?;
+        fs::write(&legacy, b"legacy fixture")?;
+        let visible = directory.path().join("Music/Zuradio Library");
+
+        let _manager = UploadManager::new(directory.path(), &visible)?;
+
+        assert!(visible.join("Artist/Album/01 - Song.mp3").is_file());
+        assert!(!legacy.exists());
+        Ok(())
+    }
+
+    #[test]
+    fn removes_abandoned_staging_files_on_startup() -> Result<(), UploadError> {
+        let directory = tempdir().map_err(|_| UploadError::Storage)?;
+        let library = directory.path().join("Music/Zuradio Library");
+        let transfer = "transfer-abandoned";
+        {
+            let mut manager = UploadManager::new(directory.path(), &library)?;
+            manager.execute(UploadOperation::Begin {
+                transfer_id: transfer.into(),
+                files: vec![UploadFileSpec {
+                    file_id: "file-abandoned".into(),
+                    relative_path: "Artist/Album/Song.wav".into(),
+                    size: 512,
+                }],
+            })?;
+            assert!(directory.path().join("uploads").join(transfer).is_dir());
+        }
+
+        let _manager = UploadManager::new(directory.path(), &library)?;
+
+        assert_eq!(
+            fs::read_dir(directory.path().join("uploads"))?.count(),
+            0,
+            "a restarted daemon must not retain an unresumable partial transfer"
+        );
+        Ok(())
+    }
+
+    fn minimal_wav() -> Vec<u8> {
+        let mut bytes = Vec::from(*b"RIFF");
+        bytes.extend_from_slice(&38_u32.to_le_bytes());
+        bytes.extend_from_slice(b"WAVEfmt ");
+        bytes.extend_from_slice(&16_u32.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&1_u16.to_le_bytes());
+        bytes.extend_from_slice(&8_000_u32.to_le_bytes());
+        bytes.extend_from_slice(&16_000_u32.to_le_bytes());
+        bytes.extend_from_slice(&2_u16.to_le_bytes());
+        bytes.extend_from_slice(&16_u16.to_le_bytes());
+        bytes.extend_from_slice(b"data");
+        bytes.extend_from_slice(&2_u32.to_le_bytes());
+        bytes.extend_from_slice(&0_i16.to_le_bytes());
+        bytes
     }
 }

@@ -113,49 +113,14 @@ impl Catalog {
     pub(crate) fn replace_scan(&mut self, tracks: &[ScannedTrack]) -> Result<(), CoreError> {
         let transaction = self.connection.transaction()?;
         transaction.execute("UPDATE tracks SET available = 0", [])?;
-        {
-            let mut statement = transaction.prepare_cached(
-                "INSERT INTO tracks(
-                    id, path, title, artist, album, album_artist, track_number, disc_number,
-                    year, duration_ms, format, has_artwork, available, file_size, modified_ms
-                 ) VALUES(
-                    ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 1, ?13, ?14
-                 ) ON CONFLICT(path) DO UPDATE SET
-                    id = excluded.id,
-                    title = excluded.title,
-                    artist = excluded.artist,
-                    album = excluded.album,
-                    album_artist = excluded.album_artist,
-                    track_number = excluded.track_number,
-                    disc_number = excluded.disc_number,
-                    year = excluded.year,
-                    duration_ms = excluded.duration_ms,
-                    format = excluded.format,
-                    has_artwork = excluded.has_artwork,
-                    available = 1,
-                    file_size = excluded.file_size,
-                    modified_ms = excluded.modified_ms",
-            )?;
-            for scanned in tracks {
-                let track = &scanned.track;
-                statement.execute(params![
-                    track.id,
-                    scanned.canonical_path.to_string_lossy(),
-                    track.title,
-                    track.artist,
-                    track.album,
-                    track.album_artist,
-                    track.track_number,
-                    track.disc_number,
-                    track.year,
-                    i64::try_from(track.duration_ms).unwrap_or(i64::MAX),
-                    track.format,
-                    track.has_artwork,
-                    i64::try_from(scanned.file_size).unwrap_or(i64::MAX),
-                    scanned.modified_ms,
-                ])?;
-            }
-        }
+        upsert_tracks(&transaction, tracks)?;
+        transaction.commit()?;
+        Ok(())
+    }
+
+    pub(crate) fn upsert_scan(&mut self, track: &ScannedTrack) -> Result<(), CoreError> {
+        let transaction = self.connection.transaction()?;
+        upsert_tracks(&transaction, std::slice::from_ref(track))?;
         transaction.commit()?;
         Ok(())
     }
@@ -172,6 +137,7 @@ impl Catalog {
                     COALESCE(year_override, year),
                     duration_ms, format, available, has_artwork
              FROM tracks
+             WHERE available = 1
              ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE,
                       COALESCE(disc_number, 1), COALESCE(track_number, 0), title COLLATE NOCASE",
         )?;
@@ -366,6 +332,73 @@ pub(crate) fn scan_music(roots: &[PathBuf]) -> Result<Vec<ScannedTrack>, CoreErr
         }
     }
     Ok(output)
+}
+
+pub(crate) fn scan_file(path: &Path, root: &Path) -> Result<ScannedTrack, CoreError> {
+    let canonical_root = root
+        .canonicalize()
+        .map_err(|error| CoreError::Media(format!("cannot open music folder: {error}")))?;
+    let canonical_path = path
+        .canonicalize()
+        .map_err(|error| CoreError::Media(format!("cannot open music file: {error}")))?;
+    if !canonical_root.is_dir()
+        || !canonical_path.is_file()
+        || !canonical_path.starts_with(&canonical_root)
+        || !is_supported(&canonical_path)
+    {
+        return Err(CoreError::InvalidInput(
+            "music file is outside the managed library or unsupported".into(),
+        ));
+    }
+    inspect_track(&canonical_path, &canonical_root)
+}
+
+fn upsert_tracks(
+    transaction: &rusqlite::Transaction<'_>,
+    tracks: &[ScannedTrack],
+) -> Result<(), CoreError> {
+    let mut statement = transaction.prepare_cached(
+        "INSERT INTO tracks(
+            id, path, title, artist, album, album_artist, track_number, disc_number,
+            year, duration_ms, format, has_artwork, available, file_size, modified_ms
+         ) VALUES(
+            ?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11, ?12, 1, ?13, ?14
+         ) ON CONFLICT(path) DO UPDATE SET
+            id = excluded.id,
+            title = excluded.title,
+            artist = excluded.artist,
+            album = excluded.album,
+            album_artist = excluded.album_artist,
+            track_number = excluded.track_number,
+            disc_number = excluded.disc_number,
+            year = excluded.year,
+            duration_ms = excluded.duration_ms,
+            format = excluded.format,
+            has_artwork = excluded.has_artwork,
+            available = 1,
+            file_size = excluded.file_size,
+            modified_ms = excluded.modified_ms",
+    )?;
+    for scanned in tracks {
+        let track = &scanned.track;
+        statement.execute(params![
+            track.id,
+            scanned.canonical_path.to_string_lossy(),
+            track.title,
+            track.artist,
+            track.album,
+            track.album_artist,
+            track.track_number,
+            track.disc_number,
+            track.year,
+            i64::try_from(track.duration_ms).unwrap_or(i64::MAX),
+            track.format,
+            track.has_artwork,
+            i64::try_from(scanned.file_size).unwrap_or(i64::MAX),
+            scanned.modified_ms,
+        ])?;
+    }
+    Ok(())
 }
 
 fn is_supported(path: &Path) -> bool {

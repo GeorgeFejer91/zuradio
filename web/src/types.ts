@@ -59,7 +59,7 @@ export type Action =
   | { kind: "pause" }
   | { kind: "stop" }
   | { kind: "play_track"; trackId: string }
-  | { kind: "seek"; positionMs: number }
+  | { kind: "seek"; positionMs: number; trackId: string }
   | { kind: "next" }
   | { kind: "previous" }
   | { kind: "set_volume"; volume: number }
