@@ -1,5 +1,5 @@
 import VDONinja, { type VDONinjaEvent } from "@vdoninja/sdk";
-import { deriveRendezvousRoute } from "./rendezvous";
+import { deriveRendezvousRoute, type RendezvousRoute } from "./rendezvous";
 import type {
   Action,
   ActionRequest,
@@ -19,6 +19,8 @@ const MAX_MESSAGE_BYTES = 16_384;
 const UPLOAD_CHUNK_BYTES = 8 * 1024;
 const MAX_UPLOAD_FILES = 512;
 const MAX_UPLOAD_FILE_BYTES = 512 * 1024 * 1024;
+const TRUST_STORAGE_KEY = "zuradio.trusted-browser.v1";
+const TRUST_LIFETIME_MS = 24 * 60 * 60 * 1_000;
 
 type MessageRecord = Record<string, unknown> & { type: string };
 
@@ -64,6 +66,18 @@ interface PendingHello {
   message: MessageRecord;
   serverProof: string;
 }
+
+interface StoredTrustedDevice {
+  version: 1;
+  deviceId: string;
+  token: string;
+  expiresAt: number;
+  route: RendezvousRoute;
+}
+
+type ConnectionAuth =
+  | { kind: "password"; password: string; deviceId: string }
+  | { kind: "device"; trusted: StoredTrustedDevice };
 
 export interface UploadProgress {
   fileName: string;
@@ -212,13 +226,28 @@ export class HostBroadcastBridge {
       if (message.type === "zuradio.hello") {
         const peerId = stringField(message, "peerId", 128);
         const mode = modeField(message, "mode");
+        const authKind = message.authKind;
+        if (authKind !== undefined && authKind !== "password" && authKind !== "device") {
+          throw new Error("Invalid authentication kind");
+        }
         const response = (await this.callbacks.verify({
           sessionId: stringField(message, "sessionId", 64),
           mode,
           peerId,
           clientNonce: stringField(message, "clientNonce", 128),
           proof: stringField(message, "proof", 256),
-        })) as { grantId: string; serverProof: string; expiresInSeconds: number; scopes: string[] };
+          ...(authKind ? { authKind } : {}),
+          ...(typeof message.deviceId === "string" ? { deviceId: stringField(message, "deviceId", 128) } : {}),
+          ...(typeof message.deviceToken === "string"
+            ? { deviceToken: stringField(message, "deviceToken", 2_048) }
+            : {}),
+        })) as {
+          grantId: string;
+          serverProof: string;
+          expiresInSeconds: number;
+          scopes: string[];
+          trustedDevice?: { token: string; expiresAt: number } | null;
+        };
         this.grants.set(uuid, { grantId: response.grantId, peerId, mode });
         this.control?.sendData(
           {
@@ -227,6 +256,7 @@ export class HostBroadcastBridge {
             serverProof: response.serverProof,
             expiresInSeconds: response.expiresInSeconds,
             scopes: response.scopes,
+            trustedDevice: response.trustedDevice ?? null,
             audio:
               mode === "upload"
                 ? null
@@ -308,7 +338,9 @@ export class CompanionBridge {
   private ready = false;
   private helloSent = false;
   private helloSending = false;
-  private passwordKey: Uint8Array<ArrayBuffer> | null = null;
+  private authKey: Uint8Array<ArrayBuffer> | null = null;
+  private connectionAuth: ConnectionAuth | null = null;
+  private connectionRoute: RendezvousRoute | null = null;
   private pendingServerProof: string | null = null;
   private pendingHello: PendingHello | null = null;
   private pendingRequests = new Map<number, PendingRequest>();
@@ -342,6 +374,14 @@ export class CompanionBridge {
     return this.mode === "upload";
   }
 
+  get trustedUntil(): number | null {
+    return readTrustedDevice()?.expiresAt ?? null;
+  }
+
+  get hasTrustedDevice(): boolean {
+    return readTrustedDevice() !== null;
+  }
+
   readSpectrum(target: Uint8Array): boolean {
     if (!this.analysisAnalyser || !this.analysisData || this.audio.paused) return false;
     this.analysisAnalyser.getByteFrequencyData(this.analysisData);
@@ -350,15 +390,34 @@ export class CompanionBridge {
   }
 
   async connect(mode: RemoteMode, password: string): Promise<void> {
-    return this.connectAttempt(mode, password, 0);
+    const existing = readTrustedDevice();
+    const deviceId = existing?.deviceId ?? crypto.randomUUID();
+    return this.connectAttempt(mode, { kind: "password", password, deviceId }, 0);
   }
 
-  private async connectAttempt(mode: RemoteMode, password: string, attempt: number): Promise<void> {
+  async connectTrusted(mode: RemoteMode): Promise<void> {
+    const trusted = readTrustedDevice();
+    if (!trusted) throw new Error("Trusted browser access expired");
+    try {
+      await this.connectAttempt(mode, { kind: "device", trusted }, 0);
+    } catch (error) {
+      clearTrustedDevice();
+      throw error;
+    }
+  }
+
+  forgetTrustedDevice(): void {
+    clearTrustedDevice();
+  }
+
+  private async connectAttempt(mode: RemoteMode, auth: ConnectionAuth, attempt: number): Promise<void> {
     await this.disconnect();
+    this.connectionAuth = auth;
     this.requestedMode = mode;
     this.discoveryNonce = randomBase64Url(24);
     this.callbacks.onStatus("Finding Zuradio laptop…");
-    const route = await deriveRendezvousRoute(password);
+    const route = auth.kind === "password" ? await deriveRendezvousRoute(auth.password) : auth.trusted.route;
+    this.connectionRoute = route;
     const rendezvous = createSdk(route.transportKey, "Zuradio password rendezvous");
     this.rendezvous = rendezvous;
     this.attachErrors(rendezvous);
@@ -382,7 +441,7 @@ export class CompanionBridge {
       const timer = setTimeout(() => {
         if (this.beaconWaiter?.timer === timer) this.beaconWaiter = null;
         reject(new Error("No active Zuradio broadcast found for this password"));
-      }, 20_000);
+      }, auth.kind === "device" ? 6_000 : 20_000);
       this.beaconWaiter = { resolve, reject, timer };
     });
     try {
@@ -418,13 +477,16 @@ export class CompanionBridge {
           if (event.detail.uuid === this.controlPeerUuid) void this.sendHello(invitation);
         }) as EventListener,
       );
-      const passwordKey = derivePasswordKey(password, invitation.passwordSalt, invitation.passwordIterations);
+      const authenticationKey =
+        auth.kind === "password"
+          ? derivePasswordKey(auth.password, invitation.passwordSalt, invitation.passwordIterations)
+          : Promise.resolve(new TextEncoder().encode(auth.trusted.token));
       const controlTransport = (async () => {
         await control.connect();
         await control.joinRoom({ room: invitation.controllerRoom, password: invitation.controllerTransportKey });
       })();
-      const [derivedPasswordKey] = await Promise.all([passwordKey, controlTransport]);
-      this.passwordKey = derivedPasswordKey;
+      const [derivedAuthenticationKey] = await Promise.all([authenticationKey, controlTransport]);
+      this.authKey = derivedAuthenticationKey;
       const ready = new Promise<void>((resolve, reject) => {
         const timer = setTimeout(() => {
           if (this.readyWaiter?.timer === timer) this.readyWaiter = null;
@@ -450,10 +512,10 @@ export class CompanionBridge {
     } catch (error) {
       const privateRouteWasReached = this.invitation !== null;
       await this.disconnect();
-      if (privateRouteWasReached && attempt < 1) {
+      if (auth.kind === "password" && privateRouteWasReached && attempt < 1) {
         this.callbacks.onStatus("Reconnecting to Zuradio laptop…");
         await delay(600);
-        return this.connectAttempt(mode, password, attempt + 1);
+        return this.connectAttempt(mode, auth, attempt + 1);
       }
       throw error;
     }
@@ -541,8 +603,10 @@ export class CompanionBridge {
     this.requestedMode = null;
     this.discoveryPeerUuid = null;
     this.controlPeerUuid = null;
-    this.passwordKey?.fill(0);
-    this.passwordKey = null;
+    this.authKey?.fill(0);
+    this.authKey = null;
+    this.connectionAuth = null;
+    this.connectionRoute = null;
     if (this.readyWaiter) {
       clearTimeout(this.readyWaiter.timer);
       this.readyWaiter.reject(new Error("Remote connection closed"));
@@ -628,14 +692,21 @@ export class CompanionBridge {
 
   private async sendHello(invitation: CompanionInvitation): Promise<boolean> {
     if (this.ready) return true;
-    if (!this.control || !this.controlPeerUuid || !this.passwordKey || this.helloSending) return false;
+    if (!this.control || !this.controlPeerUuid || !this.authKey || !this.connectionAuth || this.helloSending) {
+      return false;
+    }
     this.helloSending = true;
     try {
       if (!this.pendingHello) {
         const clientNonce = randomBase64Url(24);
-        const transcript = `zuradio/2|${invitation.session}|${invitation.epoch}|${invitation.mode}|${this.peerId}|${clientNonce}`;
-        const proof = await hmac(this.passwordKey, transcript);
-        const serverProof = await hmac(this.passwordKey, `${transcript}|accepted`);
+        const auth = this.connectionAuth;
+        const deviceId = auth.kind === "password" ? auth.deviceId : auth.trusted.deviceId;
+        const transcript =
+          auth.kind === "password"
+            ? `zuradio/2|${invitation.session}|${invitation.epoch}|${invitation.mode}|${this.peerId}|${clientNonce}`
+            : `zuradio/3|${invitation.session}|${invitation.epoch}|${invitation.mode}|${this.peerId}|${clientNonce}|device|${deviceId}`;
+        const proof = await hmac(this.authKey, transcript);
+        const serverProof = await hmac(this.authKey, `${transcript}|accepted`);
         this.pendingHello = {
           message: {
             type: "zuradio.hello",
@@ -644,6 +715,9 @@ export class CompanionBridge {
             peerId: this.peerId,
             clientNonce,
             proof,
+            authKind: auth.kind,
+            deviceId,
+            ...(auth.kind === "device" ? { deviceToken: auth.trusted.token } : {}),
           },
           serverProof,
         };
@@ -679,8 +753,23 @@ export class CompanionBridge {
       }
       this.pendingServerProof = null;
       this.pendingHello = null;
-      this.passwordKey?.fill(0);
-      this.passwordKey = null;
+      if (
+        this.connectionAuth?.kind === "password" &&
+        this.connectionRoute &&
+        isTrustedDeviceGrant(message.trustedDevice)
+      ) {
+        writeTrustedDevice({
+          version: 1,
+          deviceId: this.connectionAuth.deviceId,
+          token: message.trustedDevice.token,
+          expiresAt: message.trustedDevice.expiresAt * 1_000,
+          route: this.connectionRoute,
+        });
+      }
+      this.authKey?.fill(0);
+      this.authKey = null;
+      this.connectionAuth = null;
+      this.connectionRoute = null;
       if (this.invitation.mode === "control") {
         if (!isSnapshot(message.snapshot)) throw new Error("Controller state is unavailable");
         this.revision = message.snapshot.revision;
@@ -714,6 +803,12 @@ export class CompanionBridge {
       this.resolveRequest(message.sequence, message.response);
     } else if (message.type === "zuradio.rejected") {
       const reason = typeof message.message === "string" ? message.message : "Request rejected";
+      if (!this.ready && this.readyWaiter) {
+        clearTimeout(this.readyWaiter.timer);
+        this.readyWaiter.reject(new Error(reason));
+        this.readyWaiter = null;
+        return;
+      }
       const sequence = message.sequence;
       if (typeof sequence === "number" && Number.isSafeInteger(sequence)) {
         const pending = this.pendingRequests.get(sequence);
@@ -990,6 +1085,69 @@ function isUploadResponse(value: unknown): value is RemoteUploadResponse {
   if (!value || typeof value !== "object") return false;
   const response = value as RemoteUploadResponse;
   return Boolean(response.outcome && typeof response.outcome.status === "string");
+}
+
+function isTrustedDeviceGrant(value: unknown): value is { token: string; expiresAt: number } {
+  if (!value || typeof value !== "object") return false;
+  const grant = value as { token?: unknown; expiresAt?: unknown };
+  return (
+    typeof grant.token === "string" &&
+    grant.token.length > 32 &&
+    grant.token.length <= 2_048 &&
+    typeof grant.expiresAt === "number" &&
+    Number.isSafeInteger(grant.expiresAt) &&
+    grant.expiresAt * 1_000 > Date.now() &&
+    grant.expiresAt * 1_000 <= Date.now() + TRUST_LIFETIME_MS + 5 * 60_000
+  );
+}
+
+function readTrustedDevice(): StoredTrustedDevice | null {
+  try {
+    const raw = localStorage.getItem(TRUST_STORAGE_KEY);
+    if (!raw) return null;
+    const value = JSON.parse(raw) as Partial<StoredTrustedDevice>;
+    const route = value.route;
+    const valid =
+      value.version === 1 &&
+      typeof value.deviceId === "string" &&
+      value.deviceId.length > 0 &&
+      value.deviceId.length <= 128 &&
+      typeof value.token === "string" &&
+      value.token.length > 32 &&
+      value.token.length <= 2_048 &&
+      typeof value.expiresAt === "number" &&
+      Number.isSafeInteger(value.expiresAt) &&
+      value.expiresAt > Date.now() &&
+      value.expiresAt <= Date.now() + TRUST_LIFETIME_MS + 5 * 60_000 &&
+      route !== undefined &&
+      [route.room, route.stream, route.transportKey].every(
+        (field) => typeof field === "string" && field.length > 0 && field.length <= 128,
+      );
+    if (!valid) {
+      clearTrustedDevice();
+      return null;
+    }
+    return value as StoredTrustedDevice;
+  } catch {
+    clearTrustedDevice();
+    return null;
+  }
+}
+
+function writeTrustedDevice(device: StoredTrustedDevice): void {
+  try {
+    localStorage.setItem(TRUST_STORAGE_KEY, JSON.stringify(device));
+  } catch {
+    // Storage can be unavailable in a private browser; the live grant still works.
+  }
+}
+
+function clearTrustedDevice(): void {
+  try {
+    localStorage.removeItem(TRUST_STORAGE_KEY);
+  } catch {
+    // Storage can be unavailable in a private browser.
+  }
 }
 
 async function derivePasswordKey(password: string, salt: string, iterations: number): Promise<Uint8Array<ArrayBuffer>> {

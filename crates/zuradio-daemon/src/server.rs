@@ -1,12 +1,13 @@
 use std::collections::HashMap;
-use std::fs;
+use std::fs::{self, OpenOptions};
 use std::future::Future;
+use std::io::Write;
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::{Arc, Mutex, MutexGuard};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 use anyhow::Context;
 use axum::Router;
@@ -43,6 +44,7 @@ use crate::upload::{UploadError, UploadManager, UploadOperation, UploadOutcome};
 
 const MAX_BODY_BYTES: usize = 32 * 1024;
 const GRANT_TTL: Duration = Duration::from_hours(8);
+const TRUST_TTL: Duration = Duration::from_hours(24);
 const PASSWORD_ITERATIONS: u32 = 210_000;
 const RENDEZVOUS_SALT: &[u8] = b"zuradio-rendezvous-v1|georgefejer91-zuradio";
 
@@ -67,6 +69,7 @@ struct AppState {
     broadcast: Arc<Mutex<Option<BroadcastSession>>>,
     grants: Arc<Mutex<HashMap<String, Grant>>>,
     remote_password: Option<Arc<str>>,
+    device_trust_key: Option<Arc<[u8; 32]>>,
     uploads: Arc<Mutex<UploadManager>>,
     events: broadcast::Sender<AppSnapshot>,
 }
@@ -97,6 +100,13 @@ enum RemoteMode {
     Listen,
     Control,
     Upload,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum RemoteAuthKind {
+    Password,
+    Device,
 }
 
 impl RemoteMode {
@@ -155,6 +165,12 @@ struct VerifyRequest {
     peer_id: String,
     client_nonce: String,
     proof: String,
+    #[serde(default)]
+    auth_kind: Option<RemoteAuthKind>,
+    #[serde(default)]
+    device_id: Option<String>,
+    #[serde(default)]
+    device_token: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -164,6 +180,29 @@ struct VerifyResponse {
     server_proof: String,
     expires_in_seconds: u64,
     scopes: Vec<&'static str>,
+    trusted_device: Option<TrustedDeviceResponse>,
+}
+
+#[derive(Debug, Serialize)]
+#[serde(rename_all = "camelCase")]
+struct TrustedDeviceResponse {
+    token: String,
+    expires_at: u64,
+}
+
+#[derive(Debug, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct TrustedDeviceClaims {
+    version: u8,
+    device_id: String,
+    expires_at: u64,
+}
+
+#[derive(Debug)]
+struct RemoteAuthentication {
+    kind: RemoteAuthKind,
+    key: Vec<u8>,
+    transcript: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -237,6 +276,10 @@ where
         .as_deref()
         .map(read_remote_password)
         .transpose()?;
+    let device_trust_key = remote_password
+        .as_deref()
+        .map(|password| load_device_trust_key(&options.data_dir, password))
+        .transpose()?;
     let database_path = options.data_dir.join("zuradio.db");
     let core = ZuradioCore::open(&database_path).context("opening Zuradio catalog")?;
     let launch_token = random_secret();
@@ -252,6 +295,7 @@ where
         broadcast: Arc::new(Mutex::new(None)),
         grants: Arc::new(Mutex::new(HashMap::new())),
         remote_password: remote_password.map(Arc::from),
+        device_trust_key: device_trust_key.map(Arc::new),
         uploads: Arc::new(Mutex::new(uploads)),
         events,
     };
@@ -621,23 +665,16 @@ async fn stop_broadcast(
     Ok(StatusCode::NO_CONTENT)
 }
 
-async fn remote_verify(
-    State(state): State<AppState>,
-    headers: HeaderMap,
-    Json(request): Json<VerifyRequest>,
-) -> ApiResult<Json<VerifyResponse>> {
-    authorize_local(&headers, &state)?;
-    validate_origin(&headers)?;
+fn authenticate_remote(
+    state: &AppState,
+    session: &BroadcastSession,
+    request: &VerifyRequest,
+) -> ApiResult<RemoteAuthentication> {
     validate_bounded(&request.peer_id, 128, "peer ID")?;
     validate_bounded(&request.client_nonce, 128, "nonce")?;
-    let session = lock(&state.broadcast)?.clone().ok_or_else(|| {
-        wire_error(
-            StatusCode::CONFLICT,
-            ErrorCode::Conflict,
-            "broadcast is not active",
-            None,
-        )
-    })?;
+    if let Some(device_id) = request.device_id.as_deref() {
+        validate_bounded(device_id, 128, "device ID")?;
+    }
     if request.session_id != session.session_id {
         return Err(wire_error(
             StatusCode::FORBIDDEN,
@@ -646,33 +683,96 @@ async fn remote_verify(
             None,
         ));
     }
-    let transcript = format!(
-        "zuradio/2|{}|{}|{}|{}|{}",
-        session.session_id,
-        session.epoch,
-        request.mode.as_str(),
-        request.peer_id,
-        request.client_nonce
-    );
-    let expected = hmac_bytes(&session.password_key, transcript.as_bytes())?;
+    let authentication = remote_authentication_material(state, session, request)?;
+    let expected = hmac_bytes(&authentication.key, authentication.transcript.as_bytes())?;
     let received = URL_SAFE_NO_PAD
         .decode(request.proof.as_bytes())
-        .map_err(|_| {
-            wire_error(
-                StatusCode::UNAUTHORIZED,
-                ErrorCode::Forbidden,
-                "invalid proof",
-                None,
-            )
-        })?;
+        .map_err(|_| invalid_remote_proof())?;
     if expected.as_slice().ct_eq(received.as_slice()).unwrap_u8() != 1 {
-        return Err(wire_error(
-            StatusCode::UNAUTHORIZED,
-            ErrorCode::Forbidden,
-            "invalid proof",
-            None,
-        ));
+        return Err(invalid_remote_proof());
     }
+    Ok(authentication)
+}
+
+fn remote_authentication_material(
+    state: &AppState,
+    session: &BroadcastSession,
+    request: &VerifyRequest,
+) -> ApiResult<RemoteAuthentication> {
+    let kind = request.auth_kind.unwrap_or(RemoteAuthKind::Password);
+    let (key, transcript) = match kind {
+        RemoteAuthKind::Password => (
+            session.password_key.to_vec(),
+            format!(
+                "zuradio/2|{}|{}|{}|{}|{}",
+                session.session_id,
+                session.epoch,
+                request.mode.as_str(),
+                request.peer_id,
+                request.client_nonce
+            ),
+        ),
+        RemoteAuthKind::Device => {
+            let device_id = request
+                .device_id
+                .as_deref()
+                .ok_or_else(trusted_device_error)?;
+            let token = request
+                .device_token
+                .as_deref()
+                .ok_or_else(trusted_device_error)?;
+            validate_bounded(token, 2_048, "device token")?;
+            let trust_key = state
+                .device_trust_key
+                .as_deref()
+                .ok_or_else(trusted_device_error)?;
+            validate_device_token(trust_key, token, device_id)?;
+            (
+                token.as_bytes().to_vec(),
+                format!(
+                    "zuradio/3|{}|{}|{}|{}|{}|device|{}",
+                    session.session_id,
+                    session.epoch,
+                    request.mode.as_str(),
+                    request.peer_id,
+                    request.client_nonce,
+                    device_id
+                ),
+            )
+        }
+    };
+    Ok(RemoteAuthentication {
+        kind,
+        key,
+        transcript,
+    })
+}
+
+fn invalid_remote_proof() -> (StatusCode, Json<WireError>) {
+    wire_error(
+        StatusCode::UNAUTHORIZED,
+        ErrorCode::Forbidden,
+        "invalid proof",
+        None,
+    )
+}
+
+async fn remote_verify(
+    State(state): State<AppState>,
+    headers: HeaderMap,
+    Json(request): Json<VerifyRequest>,
+) -> ApiResult<Json<VerifyResponse>> {
+    authorize_local(&headers, &state)?;
+    validate_origin(&headers)?;
+    let session = lock(&state.broadcast)?.clone().ok_or_else(|| {
+        wire_error(
+            StatusCode::CONFLICT,
+            ErrorCode::Conflict,
+            "broadcast is not active",
+            None,
+        )
+    })?;
+    let authentication = authenticate_remote(&state, &session, &request)?;
     let grant_id = random_secret();
     lock(&state.grants)?.insert(
         grant_id.clone(),
@@ -685,9 +785,19 @@ async fn remote_verify(
         },
     );
     let server_proof = URL_SAFE_NO_PAD.encode(hmac_bytes(
-        &session.password_key,
-        format!("{transcript}|accepted").as_bytes(),
+        &authentication.key,
+        format!("{}|accepted", authentication.transcript).as_bytes(),
     )?);
+    let trusted_device = if authentication.kind == RemoteAuthKind::Password {
+        request
+            .device_id
+            .as_deref()
+            .zip(state.device_trust_key.as_deref())
+            .map(|(device_id, trust_key)| issue_device_token(trust_key, device_id))
+            .transpose()?
+    } else {
+        None
+    };
     let scopes = match request.mode {
         RemoteMode::Listen => vec!["stream:listen", "now-playing:read"],
         RemoteMode::Control => vec![
@@ -704,6 +814,7 @@ async fn remote_verify(
         server_proof,
         expires_in_seconds: GRANT_TTL.as_secs(),
         scopes,
+        trusted_device,
     }))
 }
 
@@ -1041,6 +1152,113 @@ fn hmac_bytes(key: &[u8], data: &[u8]) -> ApiResult<Vec<u8>> {
     Ok(mac.finalize().into_bytes().to_vec())
 }
 
+fn load_device_trust_key(data_dir: &Path, password: &str) -> anyhow::Result<[u8; 32]> {
+    let path = data_dir.join("device-trust.key");
+    let persistent_secret = match fs::read(&path) {
+        Ok(bytes) => bytes,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            let generated = rand::random::<[u8; 32]>();
+            let mut options = OpenOptions::new();
+            options.write(true).create_new(true);
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::OpenOptionsExt;
+                options.mode(0o600);
+            }
+            match options.open(&path) {
+                Ok(mut file) => {
+                    file.write_all(&generated)?;
+                    generated.to_vec()
+                }
+                Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => fs::read(&path)?,
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Err(error) => return Err(error.into()),
+    };
+    anyhow::ensure!(
+        persistent_secret.len() == 32,
+        "device trust key has an invalid length"
+    );
+    let iterations = NonZeroU32::new(PASSWORD_ITERATIONS)
+        .ok_or_else(|| anyhow::anyhow!("invalid password derivation count"))?;
+    let mut password_key = [0_u8; 32];
+    pbkdf2::derive(
+        pbkdf2::PBKDF2_HMAC_SHA256,
+        iterations,
+        RENDEZVOUS_SALT,
+        password.as_bytes(),
+        &mut password_key,
+    );
+    let mut mac = <Hmac<Sha256> as KeyInit>::new_from_slice(&persistent_secret)
+        .map_err(|_| anyhow::anyhow!("initializing device trust key"))?;
+    mac.update(&password_key);
+    let derived = mac.finalize().into_bytes();
+    password_key.fill(0);
+    let mut trust_key = [0_u8; 32];
+    trust_key.copy_from_slice(&derived);
+    Ok(trust_key)
+}
+
+fn issue_device_token(key: &[u8; 32], device_id: &str) -> ApiResult<TrustedDeviceResponse> {
+    let expires_at = unix_time()?.saturating_add(TRUST_TTL.as_secs());
+    let claims = TrustedDeviceClaims {
+        version: 1,
+        device_id: device_id.to_owned(),
+        expires_at,
+    };
+    let payload = serde_json::to_vec(&claims).map_err(|_| trusted_device_error())?;
+    let signature = hmac_bytes(key, &payload)?;
+    Ok(TrustedDeviceResponse {
+        token: format!(
+            "{}.{}",
+            URL_SAFE_NO_PAD.encode(payload),
+            URL_SAFE_NO_PAD.encode(signature)
+        ),
+        expires_at,
+    })
+}
+
+fn validate_device_token(key: &[u8; 32], token: &str, device_id: &str) -> ApiResult<()> {
+    let (payload_encoded, signature_encoded) =
+        token.split_once('.').ok_or_else(trusted_device_error)?;
+    if signature_encoded.contains('.') {
+        return Err(trusted_device_error());
+    }
+    let payload = URL_SAFE_NO_PAD
+        .decode(payload_encoded.as_bytes())
+        .map_err(|_| trusted_device_error())?;
+    let signature = URL_SAFE_NO_PAD
+        .decode(signature_encoded.as_bytes())
+        .map_err(|_| trusted_device_error())?;
+    let expected = hmac_bytes(key, &payload)?;
+    if expected.as_slice().ct_eq(signature.as_slice()).unwrap_u8() != 1 {
+        return Err(trusted_device_error());
+    }
+    let claims: TrustedDeviceClaims =
+        serde_json::from_slice(&payload).map_err(|_| trusted_device_error())?;
+    if claims.version != 1 || claims.device_id != device_id || claims.expires_at <= unix_time()? {
+        return Err(trusted_device_error());
+    }
+    Ok(())
+}
+
+fn unix_time() -> ApiResult<u64> {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|duration| duration.as_secs())
+        .map_err(|_| trusted_device_error())
+}
+
+fn trusted_device_error() -> (StatusCode, Json<WireError>) {
+    wire_error(
+        StatusCode::UNAUTHORIZED,
+        ErrorCode::Forbidden,
+        "trusted browser access expired",
+        None,
+    )
+}
+
 fn derive_password_key(password: &[u8], salt: &[u8]) -> ApiResult<[u8; 32]> {
     let iterations = NonZeroU32::new(PASSWORD_ITERATIONS).ok_or_else(|| {
         wire_error(
@@ -1179,6 +1397,44 @@ mod tests {
             room,
             rendezvous_component(&key, b"room").map_err(|_| "room failed")?
         );
+        Ok(())
+    }
+
+    #[test]
+    fn trusted_device_token_is_bound_and_expires_in_24_hours() -> Result<(), String> {
+        let key = [7_u8; 32];
+        let issued = issue_device_token(&key, "browser-one").map_err(|_| "issue failed")?;
+        validate_device_token(&key, &issued.token, "browser-one")
+            .map_err(|_| "valid token rejected")?;
+        assert!(validate_device_token(&key, &issued.token, "browser-two").is_err());
+        let now = unix_time().map_err(|_| "clock failed")?;
+        assert!(issued.expires_at >= now + TRUST_TTL.as_secs() - 1);
+        assert!(issued.expires_at <= now + TRUST_TTL.as_secs());
+        let tampered = format!("{}x", issued.token);
+        assert!(validate_device_token(&key, &tampered, "browser-one").is_err());
+        Ok(())
+    }
+
+    #[test]
+    fn trusted_device_key_persists_and_changes_with_password() -> Result<(), String> {
+        let directory = tempfile::tempdir().map_err(|error| error.to_string())?;
+        let first = load_device_trust_key(directory.path(), "first-password")
+            .map_err(|error| error.to_string())?;
+        let repeated = load_device_trust_key(directory.path(), "first-password")
+            .map_err(|error| error.to_string())?;
+        let changed = load_device_trust_key(directory.path(), "second-password")
+            .map_err(|error| error.to_string())?;
+        assert_eq!(first, repeated);
+        assert_ne!(first, changed);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(directory.path().join("device-trust.key"))
+                .map_err(|error| error.to_string())?
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o077, 0);
+        }
         Ok(())
     }
 }

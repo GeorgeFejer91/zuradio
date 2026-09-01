@@ -35,14 +35,17 @@ and reported success.
 
 ### Rust
 
-- `cargo test --workspace --exclude zuradio-desktop`: 19 Rust domain, daemon,
-  and CLI tests passed, 0 failed (10 core, 8 daemon, 1 CLI).
+- `cargo test --workspace --exclude zuradio-desktop`: 22 Rust domain, daemon,
+  and CLI tests passed, 0 failed (10 core, 11 daemon, 1 CLI).
 - `cargo clippy --workspace --all-targets -- -D warnings`: passed.
 - Core coverage includes stale-revision rejection, listener mutation denial,
   command-ID deduplication, playlist creation/rename, queue shuffle restoration,
   symlink refusal, all 12 accepted audio extensions, upload path/offset/size and
   digest rejection, metadata inference, JavaScript-safe broadcast epochs,
   explicit CLI boolean parsing, and single-Range parsing.
+- Trusted-browser coverage proves signed-token tamper rejection, device binding,
+  an exact 24-hour expiry, persistence across daemon restarts, and invalidation
+  when the laptop password changes.
 - Optimized `zuradio-daemon` release build: passed.
 
 ### Desktop shells
@@ -96,7 +99,9 @@ the binary and web files installed under `~/.local` using an isolated database:
 1. Real VDO.Ninja broadcast with separate host, listener, and controller browser
    contexts, password-only rendezvous, an attached live audio
    `MediaStreamTrack`, sanitized listener now-playing data, and controller
-   authentication.
+   authentication. The controller then reloads in the same browser context and
+   reconnects without a password dialog using the 24-hour credential; the test
+   also proves that browser storage does not contain the raw password.
 2. Scan, search, album, artist, group-to-library navigation, and library browsing.
 3. Phone-width playlist-library create, select, populate through the dedicated
    track picker, reorder, remove, rename, save, reopen, and delete.

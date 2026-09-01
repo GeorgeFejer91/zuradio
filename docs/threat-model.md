@@ -15,6 +15,10 @@ Status: MVP security contract, 2026-09-01.
 - GitHub Pages and its request logs.
 - Public signaling, STUN, and TURN infrastructure.
 - Remote browsers, received data-channel messages, and peer display names.
+- The 24-hour credential in companion origin storage. It is a short-lived
+  bearer secret exposed to same-origin script, so CSP, dependency pinning,
+  framing refusal, device binding, expiry, and the local Forget action are part
+  of its security boundary; the raw password is never stored.
 - Music metadata, artwork, filenames, symlinks, and malformed media files.
 
 The local browser bridge is less trusted than Rust: it can request a fixed action
@@ -81,6 +85,9 @@ protocol. Direct Internet exposure of the loopback daemon is out of scope.
 - Password-gated folder/file upload, wrong-password rejection before audio or
   authority exposure, digest/offset/path validation, managed repository commit,
   metadata inference, and persistent local metadata correction.
+- Passwordless trusted-browser reconnect after reload, no password in browser
+  storage, device/expiry binding, tamper rejection, password-change
+  invalidation, and an explicit Forget-this-browser path.
 - Real VDO.Ninja audio/data transport between independent host, listener, and
   controller Chromium contexts.
 - Listener UI immutability and controller player/queue/playlist behavior.

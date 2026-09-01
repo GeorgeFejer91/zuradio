@@ -95,12 +95,43 @@ try {
     () => document.querySelector('[data-testid="play-pause"]')?.getAttribute("aria-label") === "Pause",
   );
 
+  await controller.getByRole("button", { name: "Disconnect", exact: true }).click();
+  await controller.getByTestId("connect-control").waitFor();
+  const trustedController = await controllerContext.newPage();
+  watch(trustedController, "trusted-controller", errors);
+  await trustedController.goto(publicUrl, { waitUntil: "domcontentloaded" });
+  const trustedStarted = performance.now();
+  await trustedController.getByTestId("connect-control").click();
+  if ((await trustedController.getByRole("dialog").count()) !== 0) {
+    throw new Error("Trusted browser unexpectedly requested the Zuradio password");
+  }
+  await trustedController.getByText("Controller connected", { exact: true }).waitFor({ timeout: 20_000 });
+  const trustedConnectMs = Math.round(performance.now() - trustedStarted);
+  assertBelow("trusted-browser passwordless reconnect", trustedConnectMs, maxConnectMs);
+  if ((await trustedController.locator(".controller-panel .track-row").count()) !== expectedTracks) {
+    throw new Error("Trusted browser connected without the installed music library");
+  }
+  const trustedCommandStarted = performance.now();
+  await trustedController.getByTestId("remote-play-pause").click();
+  await host.waitForFunction(
+    () => document.querySelector('[data-testid="play-pause"]')?.getAttribute("aria-label") === "Play",
+  );
+  const trustedCommandRttMs = Math.round(performance.now() - trustedCommandStarted);
+  assertBelow("trusted-browser command acknowledgement", trustedCommandRttMs, maxCommandMs);
+  await trustedController.getByTestId("remote-play-pause").click();
+  await host.waitForFunction(
+    () => document.querySelector('[data-testid="play-pause"]')?.getAttribute("aria-label") === "Pause",
+  );
+  await trustedController.getByRole("button", { name: "Disconnect", exact: true }).click();
+
   if (errors.length > 0) throw new Error(`Browser errors: ${errors.join(" | ")}`);
   process.stdout.write(`${JSON.stringify({
     result: "passed",
     listenerConnectMs,
     controllerConnectMs,
     commandRttMs,
+    trustedConnectMs,
+    trustedCommandRttMs,
     trackCount: expectedTracks,
     streamTrackReceived: true,
   }, null, 2)}\n`);

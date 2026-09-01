@@ -133,10 +133,21 @@ async function handleClick(target: HTMLElement): Promise<void> {
   const name = target.dataset.action;
   if (!name) return;
   if (name === "choose-mode") {
-    dialogMode = target.dataset.mode as RemoteMode;
+    const mode = target.dataset.mode as RemoteMode;
     errorMessage = "";
+    if (bridge.hasTrustedDevice) {
+      await connectTrusted(mode);
+      return;
+    }
+    dialogMode = mode;
     render();
     root.querySelector<HTMLInputElement>("[data-password]")?.focus();
+    return;
+  }
+  if (name === "forget-device") {
+    bridge.forgetTrustedDevice();
+    errorMessage = "This browser will ask for the Zuradio password next time.";
+    render();
     return;
   }
   if (name === "cancel-connect") {
@@ -294,6 +305,26 @@ async function connect(mode: RemoteMode, password: string): Promise<void> {
   }
 }
 
+async function connectTrusted(mode: RemoteMode): Promise<void> {
+  errorMessage = "";
+  busy = true;
+  selectedMode = mode;
+  dialogMode = null;
+  render();
+  try {
+    await bridge.connectTrusted(mode);
+    connected = true;
+  } catch {
+    errorMessage = "Trusted access expired. Enter the Zuradio password again.";
+    connected = false;
+    dialogMode = mode;
+  } finally {
+    busy = false;
+    render();
+    if (dialogMode) root.querySelector<HTMLInputElement>("[data-password]")?.focus();
+  }
+}
+
 async function uploadSelectedFiles(): Promise<void> {
   if (!selectedFiles.length) return;
   busy = true;
@@ -367,10 +398,12 @@ function render(): void {
 }
 
 function renderConnectionModes(): string {
+  const trustedUntil = bridge.trustedUntil;
   return `<section class="connection-panel access-landing">
     <span class="eyebrow">Laptop link</span>
     <h2>Choose access</h2>
-    <p class="muted">The password finds your active Zuradio laptop and opens only the mode you select.</p>
+    <p class="muted">${trustedUntil ? "This browser is trusted. Choose a mode to connect without entering the password again." : "The password finds your active Zuradio laptop and opens only the mode you select."}</p>
+    ${trustedUntil ? `<div class="trusted-device" data-testid="trusted-device"><span>Trusted until ${escapeHtml(formatTrustedUntil(trustedUntil))}</span><button data-action="forget-device">Forget this browser</button></div>` : ""}
     <div class="connect-modes">
       <button data-action="choose-mode" data-mode="listen" data-testid="connect-listen"><span>01</span><strong>Listen</strong><small>Hear the live stream</small></button>
       <button data-action="choose-mode" data-mode="control" data-testid="connect-control"><span>02</span><strong>Control</strong><small>Player, queue and playlists</small></button>
@@ -551,6 +584,13 @@ function disabled(): string {
 function formatTime(milliseconds: number): string {
   const seconds = Math.max(0, Math.floor(milliseconds / 1000));
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function formatTrustedUntil(timestamp: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "medium",
+    timeStyle: "short",
+  }).format(new Date(timestamp));
 }
 
 function capitalize(value: string): string {

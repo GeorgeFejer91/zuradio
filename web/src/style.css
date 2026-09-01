@@ -695,6 +695,24 @@ h3 {
   letter-spacing: -0.035em;
 }
 
+.trusted-device {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  margin-top: 22px;
+  padding: 10px 0;
+  border-block: 1px solid var(--line);
+  color: var(--success);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+}
+
+.trusted-device button {
+  min-height: 36px;
+  padding: 7px 10px;
+}
+
 .connect-modes {
   margin-top: 34px;
   border-top: 1px solid var(--line-strong);

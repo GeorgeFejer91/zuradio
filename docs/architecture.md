@@ -101,6 +101,15 @@ action/upload also carries a strictly increasing sequence. Upload grants cannot
 control or listen; listener grants cannot inspect the library or mutate it;
 only listen/control receive the live audio route.
 
+The first successful password proof can request a 24-hour trusted-browser
+credential. Rust signs a device-ID and expiry claim with a persistent local
+secret mixed with the current password-derived key. The companion stores that
+signed token and deterministic rendezvous coordinates, but never the raw
+password. A remembered browser authenticates each later session with a new
+nonce-bound HMAC keyed by the signed token; Rust verifies the signature,
+device, expiry, session transcript, and mutual server proof. Changing the
+password changes the signing key and invalidates all prior tokens.
+
 Discovery teardown, password-key derivation, and private control transport are
 overlapped where their dependencies allow. Controller commands become
 available as soon as mutual proof and the initial snapshot complete; the

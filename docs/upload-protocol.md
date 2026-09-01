@@ -1,6 +1,6 @@
 # Zuradio remote password and upload protocol
 
-Status: protocol version 2, 2026-09-01.
+Status: protocol versions 2–3, 2026-09-01.
 
 ## Modes and trust boundary
 
@@ -16,9 +16,14 @@ The browser derives a 256-bit key with PBKDF2-HMAC-SHA-256 using 210,000
 iterations, then proves it with HMAC over the versioned session, epoch, mode,
 peer ID, and fresh client nonce. Rust verifies that proof and returns a server
 proof over the same transcript. The browser clears the entered password and
-derived key after the hello is sent. A successful proof creates a short-lived,
+derived key after mutual authentication completes. A successful proof creates a short-lived,
 mode-scoped grant bound to that VDO peer and a strictly increasing request
 sequence. Reusing a proof for another mode does not work.
+
+After a successful password proof, the same browser may use Zuradio's signed
+24-hour trusted-device credential for later connections. It still sends a
+fresh nonce-bound proof and receives only the selected mode's scope; the
+credential does not turn an upload session into a controller or listener.
 
 - `listen`: sanitized now-playing state and the live Opus audio route.
 - `control`: canonical library/player state, live audio, and the closed Rust

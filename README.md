@@ -90,6 +90,13 @@ readable by group or other users (`chmod 600`). It can also be selected with
 `--remote-password-file` or `ZURADIO_REMOTE_PASSWORD_FILE`. The password is
 never placed in a URL, database, GitHub Pages artifact, or log.
 
+After one correct password, Rust issues that browser a device-bound credential
+that expires after 24 hours. The companion stores the signed credential and
+password-derived discovery coordinates, never the raw password. During that
+window, tapping Listen, Control, or Upload reconnects without another password
+dialog. **Forget this browser** removes the local credential; changing the
+laptop password invalidates every remembered browser.
+
 ## Add music and use the CLI
 
 The installed service uses the desktop Music folder (on this machine,
@@ -139,8 +146,9 @@ and 16 GiB per batch. See [the upload protocol](docs/upload-protocol.md).
    unlocks its audio graph, and starts broadcasting automatically.
 2. Select a track locally or from an authenticated Control connection.
 3. Open the Zuradio Web Companion on a phone and tap **Listen**, **Control**, or
-   **Upload**. The site prompts for the shared password; no URL needs to be
-   copied or pasted.
+   **Upload**. The first connection prompts for the shared password; that
+   browser then reconnects without another prompt for 24 hours. No URL needs to
+   be copied or pasted.
 4. Listen receives live audio and sanitized now-playing data. Control adds the
    player, queue, library, favorites, and a persistent playlist library. Upload
    accepts files or folders for the managed laptop repository. Rust grants only
@@ -154,6 +162,11 @@ laptop returns fresh private session coordinates over the exact requester-bound
 WebRTC channel, then Rust requires a separate PBKDF2/HMAC proof before exposing
 state, audio, uploads, or control. The companion registers no service worker and
 has no catalog or media endpoint.
+
+Remembered browsers use a separate signed 24-hour bearer credential to produce
+a fresh nonce-bound HMAC proof for every new session. The credential is bound
+to one generated browser-device ID and never bypasses mode scopes, sequence
+checks, broadcast rotation, or mutual server proof.
 
 ## Development and qualification
 

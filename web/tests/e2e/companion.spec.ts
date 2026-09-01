@@ -72,6 +72,19 @@ test("streams from the laptop while enforcing listener and controller roles", as
     await expect(controller.getByText("Controller connected", { exact: true })).toBeVisible({ timeout: 45_000 });
     const controllerConnectMs = Date.now() - controllerConnectStarted;
     expect(controllerConnectMs, "controller password-to-ready latency").toBeLessThan(MAX_CONNECT_LATENCY_MS);
+    const trustedDevice = await controller.evaluate((rawPassword) => {
+      const raw = localStorage.getItem("zuradio.trusted-browser.v1") ?? "";
+      const stored = raw ? (JSON.parse(raw) as { deviceId?: string; expiresAt?: number }) : {};
+      return {
+        hasDeviceId: typeof stored.deviceId === "string" && stored.deviceId.length > 0,
+        expiresAt: stored.expiresAt ?? 0,
+        containsPassword: raw.includes(rawPassword),
+      };
+    }, password);
+    expect(trustedDevice.hasDeviceId).toBe(true);
+    expect(trustedDevice.containsPassword).toBe(false);
+    expect(trustedDevice.expiresAt - Date.now()).toBeGreaterThan(23 * 60 * 60 * 1_000);
+    expect(trustedDevice.expiresAt - Date.now()).toBeLessThanOrEqual(24 * 60 * 60 * 1_000);
     await expect(controller.getByTestId("companion-visualizer")).toBeVisible();
     await expect(controller.locator(".controller-panel .track-row")).toHaveCount(initialTrackCount);
     const remotePlayPause = controller.getByTestId("remote-play-pause");
@@ -201,15 +214,33 @@ test("streams from the laptop while enforcing listener and controller roles", as
 
     await controller.screenshot({ path: "test-results/mobile-controller.png", fullPage: true });
     await listener.screenshot({ path: "test-results/mobile-listener.png", fullPage: true });
+    await controller.getByRole("button", { name: "Disconnect", exact: true }).click();
+    await expect(controller.getByTestId("connect-control")).toBeVisible();
+    await expect(controller.getByTestId("trusted-device")).toContainText("Trusted until");
+    const trustedController = await controllerContext.newPage();
+    watch(trustedController, "trusted-controller", errors);
+    await trustedController.goto(companionBase);
+    const trustedConnectStarted = Date.now();
+    await trustedController.getByTestId("connect-control").click();
+    await expect(trustedController.getByRole("dialog")).toHaveCount(0);
+    await expect(trustedController.getByText("Controller connected", { exact: true })).toBeVisible({ timeout: 20_000 });
+    const trustedConnectMs = Date.now() - trustedConnectStarted;
+    expect(trustedConnectMs, "trusted-browser passwordless reconnect latency").toBeLessThan(MAX_CONNECT_LATENCY_MS);
+    await expect(trustedController.getByLabel("Remote player controls")).toBeVisible();
+    await trustedController.getByRole("button", { name: "Disconnect", exact: true }).click();
+    await trustedController.getByRole("button", { name: "Forget this browser", exact: true }).click();
+    await expect(trustedController.getByTestId("trusted-device")).toHaveCount(0);
+    await trustedController.getByTestId("connect-control").click();
+    await expect(trustedController.getByRole("dialog")).toBeVisible();
+    await expect(trustedController.getByTestId("password")).toBeFocused();
+    await trustedController.getByRole("button", { name: "Cancel", exact: true }).click();
+
+    await listener.getByRole("button", { name: "Disconnect", exact: true }).click();
+    await expect(listener.getByTestId("connect-listen")).toBeVisible();
     await test.info().attach("latency-metrics.json", {
-      body: JSON.stringify({ listenerConnectMs, controllerConnectMs, commandRttMs }, null, 2),
+      body: JSON.stringify({ listenerConnectMs, controllerConnectMs, commandRttMs, trustedConnectMs }, null, 2),
       contentType: "application/json",
     });
-
-    await controller.getByRole("button", { name: "Disconnect", exact: true }).click();
-    await listener.getByRole("button", { name: "Disconnect", exact: true }).click();
-    await expect(controller.getByTestId("connect-control")).toBeVisible();
-    await expect(listener.getByTestId("connect-listen")).toBeVisible();
     expect(errors, "browser page and console errors").toEqual([]);
   } finally {
     await host.evaluate(() => fetch("/api/v1/broadcast/stop", { method: "POST" })).catch(() => undefined);
