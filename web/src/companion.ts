@@ -29,6 +29,7 @@ let connected = false;
 let busy = false;
 let view: ControllerView = "library";
 let search = "";
+let invitationInput = "";
 let selectedPlaylistId: string | null = null;
 let pendingPlaylistSelection: Set<string> | null = null;
 
@@ -78,6 +79,8 @@ root.addEventListener("input", (event) => {
   if (input.matches("[data-search]")) {
     search = input.value;
     render();
+  } else if (input.matches("[data-invitation]")) {
+    invitationInput = input.value;
   }
 });
 
@@ -208,10 +211,10 @@ async function connect(): Promise<void> {
   if (!invitation) {
     const input = root.querySelector<HTMLInputElement>("[data-invitation]");
     try {
-      const value = input?.value.trim() ?? "";
+      const value = invitationInput.trim() || input?.value.trim() || "";
       const url = new URL(value);
       invitation = parseInvitation(url.hash);
-      if (input) input.value = "";
+      invitationInput = "";
     } catch (error) {
       errorMessage = messageOf(error) || "Paste a complete Zuradio invitation";
       render();
@@ -262,7 +265,7 @@ function render(): void {
       <div class="section-header"><div><h2>Connection</h2><p class="muted">${escapeHtml(connectionStatus)}</p></div>
         ${connected ? `<button data-action="disconnect" ${disabled()}>Disconnect</button>` : `<button class="primary" data-action="connect" data-testid="connect" ${disabled()}>Connect</button>`}
       </div>
-      ${!invitation ? `<label for="invitation">Invitation link</label><input id="invitation" data-invitation type="url" autocomplete="off" spellcheck="false" placeholder="Paste the link from the Zuradio laptop" />` : `<p class="muted">The invitation is held in memory only. Its URL fragment has been removed from the address bar.</p>`}
+      ${!invitation ? `<label for="invitation">Invitation link</label><input id="invitation" data-invitation type="url" autocomplete="off" spellcheck="false" value="${escapeAttribute(invitationInput)}" placeholder="Paste the link from the Zuradio laptop" />` : `<p class="muted">The invitation is held in memory only. Its URL fragment has been removed from the address bar.</p>`}
     </section>
     <section class="companion-player">
       <h2>Now playing</h2>

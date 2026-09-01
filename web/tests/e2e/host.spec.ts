@@ -38,9 +38,13 @@ test("scans, searches, and browses the real local catalog", async ({ page }) => 
   await page.getByTestId("search").fill("");
   await page.getByRole("button", { name: /Albums/ }).click();
   await expect(page.getByRole("heading", { name: "Albums" })).toBeVisible();
+  await page.getByRole("button", { name: "Unknown Album", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Library" })).toBeVisible();
+  await expect(page.locator("[data-track-row]")).toHaveCount(3);
   await page.getByRole("button", { name: /Artists/ }).click();
   await expect(page.getByRole("heading", { name: "Artists" })).toBeVisible();
-  await page.getByRole("button", { name: /Library/ }).click();
+  await page.getByRole("button", { name: "Unknown Artist", exact: true }).click();
+  await expect(page.getByRole("heading", { name: "Library" })).toBeVisible();
   await expect(page.locator("[data-track-row]")).toHaveCount(3);
 });
 
@@ -188,6 +192,9 @@ test("creates role-separated broadcast invitations and revokes them", async ({ p
   expect(controller).toContain("#v=1&role=controller");
   expect(controller).toContain("pairingKey=");
   expect(new URL(listener).search).toBe("");
+  await page.context().grantPermissions(["clipboard-read", "clipboard-write"], { origin: runtime.baseUrl });
+  await page.getByTestId("listener-invitation").locator("..").getByRole("button", { name: "Copy" }).click();
+  await expect.poll(() => page.evaluate(() => navigator.clipboard.readText())).toBe(listener);
   await page.getByTestId("stop-broadcast").click();
   await expect(page.getByTestId("start-broadcast")).toBeVisible();
 });

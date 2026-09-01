@@ -48,22 +48,25 @@ and reported success.
 
 ### Live browser UI
 
-Playwright 1.62.1 with Chromium 151 ran nine tests with one worker. The complete
+Playwright 1.62.1 with Chromium 151 ran ten tests with one worker. The complete
 matrix passed first against the development release build and then again against
 the binary and web files installed under `~/.local` using an isolated database:
 
 1. Real VDO.Ninja broadcast with separate host, listener, and controller browser
    contexts, an attached live audio `MediaStreamTrack`, fragment erasure,
    sanitized listener now-playing data, and controller authentication.
-2. Scan, search, album, artist, and library browsing.
+2. Scan, search, album, artist, group-to-library navigation, and library browsing.
 3. Playlist create, select, populate, reorder, remove, rename, and delete.
 4. Play, pause, resume, stop, next, previous, seek, volume, mute, favorite,
    history, shuffle, order restoration, and repeat modes.
 5. Queue add, move, remove, and clear.
-6. Separate controller/listener invitation creation and Stop revocation.
+6. Separate controller/listener invitation creation, clipboard copy, and Stop
+   revocation.
 7. Keyboard reachability and 390 × 844 responsive layout.
 8. Loopback health and unauthenticated snapshot rejection.
-9. Forged-proof rejection, listener escalation denial, actor overwrite, valid
+9. Safe no-invitation/offline landing behavior and editable malformed-link
+   validation.
+10. Forged-proof rejection, listener escalation denial, actor overwrite, valid
    controller acceptance, peer binding, replay rejection, and grant revocation.
 
 Page and console error collectors were empty in the passing live-stream run.
@@ -96,6 +99,10 @@ negative assertions before upload.
   that peer's data channel opens.
 - The controller accepted no proof of the Rust side; mutual server-proof
   verification is now required.
+- The companion could display “Controller connected” before receiving the
+  mutually authenticated initial snapshot; success now waits for both.
+- A malformed pasted invitation was erased during validation; it now remains
+  editable while the error is shown.
 - Local user actions could race a short track's automatic `next`, causing stale
   revisions; host mutations are now serialized.
 - The installer could scan before the first service startup had written its

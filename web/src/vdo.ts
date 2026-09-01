@@ -32,6 +32,12 @@ interface PendingCommand {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface ControllerReadyWaiter {
+  resolve(): void;
+  reject(error: Error): void;
+  timer: ReturnType<typeof setTimeout>;
+}
+
 export class HostBroadcastBridge {
   private listen: VDONinja | null = null;
   private control: VDONinja | null = null;
@@ -186,6 +192,7 @@ export class CompanionBridge {
   private ready = false;
   private pendingServerProof: string | null = null;
   private pendingCommands = new Map<number, PendingCommand>();
+  private readyWaiter: ControllerReadyWaiter | null = null;
 
   constructor(
     private readonly audio: HTMLAudioElement,
@@ -230,8 +237,11 @@ export class CompanionBridge {
       label: "Zuradio listener",
     });
 
-    if (invitation.role === "controller") await this.connectController(invitation);
-    this.callbacks.onStatus(invitation.role === "controller" ? "Controller connected" : "Listening live");
+    if (invitation.role === "controller") {
+      await this.connectController(invitation);
+    } else {
+      this.callbacks.onStatus("Listening live");
+    }
   }
 
   async send(action: Action): Promise<void> {
@@ -270,6 +280,11 @@ export class CompanionBridge {
     this.ready = false;
     this.sequence = 1;
     this.pendingServerProof = null;
+    if (this.readyWaiter) {
+      clearTimeout(this.readyWaiter.timer);
+      this.readyWaiter.reject(new Error("Controller disconnected"));
+      this.readyWaiter = null;
+    }
     for (const pending of this.pendingCommands.values()) {
       clearTimeout(pending.timer);
       pending.reject(new Error("Controller disconnected"));
@@ -313,14 +328,30 @@ export class CompanionBridge {
       room: invitation.controllerRoom,
       password: invitation.controllerTransportKey,
     });
-    await control.view(invitation.controllerStream, {
-      audio: false,
-      video: false,
-      dataOnly: true,
-      downloads: false,
-      allowresources: false,
-      label: "Zuradio controller",
+    const ready = new Promise<void>((resolve, reject) => {
+      const timer = setTimeout(() => {
+        if (this.readyWaiter?.timer === timer) this.readyWaiter = null;
+        reject(new Error("The laptop did not complete controller authentication"));
+      }, 15_000);
+      this.readyWaiter = { resolve, reject, timer };
     });
+    try {
+      await control.view(invitation.controllerStream, {
+        audio: false,
+        video: false,
+        dataOnly: true,
+        downloads: false,
+        allowresources: false,
+        label: "Zuradio controller",
+      });
+      await ready;
+    } catch (error) {
+      if (this.readyWaiter) {
+        clearTimeout(this.readyWaiter.timer);
+        this.readyWaiter = null;
+      }
+      throw error;
+    }
   }
 
   private async sendHello(invitation: CompanionInvitation): Promise<void> {
@@ -357,6 +388,11 @@ export class CompanionBridge {
       this.revision = message.snapshot.revision;
       this.callbacks.onSnapshot(message.snapshot);
       this.callbacks.onStatus("Controller connected");
+      if (this.readyWaiter) {
+        clearTimeout(this.readyWaiter.timer);
+        this.readyWaiter.resolve();
+        this.readyWaiter = null;
+      }
     } else if (message.type === "zuradio.snapshot" && isSnapshot(message.snapshot)) {
       this.revision = message.snapshot.revision;
       this.callbacks.onSnapshot(message.snapshot);
