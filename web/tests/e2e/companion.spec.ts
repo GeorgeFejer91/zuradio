@@ -87,6 +87,37 @@ test("streams from the laptop while enforcing listener and controller roles", as
     expect(trustedDevice.expiresAt - Date.now()).toBeLessThanOrEqual(24 * 60 * 60 * 1_000);
     await expect(controller.getByTestId("companion-visualizer")).toBeVisible();
     await expect(controller.locator(".controller-panel .track-row")).toHaveCount(initialTrackCount);
+    await expect(controller.locator(".companion-cover")).toBeVisible();
+    const mobileLayout = await controller.evaluate(() => {
+      const navigation = document.querySelector<HTMLElement>('.controller-panel nav[aria-label="Controller sections"]')?.getBoundingClientRect();
+      const firstButton = document.querySelector<HTMLElement>('.controller-panel nav[aria-label="Controller sections"] button')?.getBoundingClientRect();
+      const cover = document.querySelector<HTMLElement>(".companion-cover")?.getBoundingClientRect();
+      return {
+        navigationAtBottom: Boolean(navigation && Math.abs(navigation.bottom - window.innerHeight) <= 2),
+        navigationTouchTarget: firstButton?.height ?? 0,
+        coverWidth: cover?.width ?? 0,
+        noHorizontalOverflow: document.documentElement.scrollWidth <= window.innerWidth,
+      };
+    });
+    expect(mobileLayout.navigationAtBottom).toBe(true);
+    expect(mobileLayout.navigationTouchTarget).toBeGreaterThanOrEqual(44);
+    expect(mobileLayout.coverWidth).toBeGreaterThanOrEqual(88);
+    expect(mobileLayout.noHorizontalOverflow).toBe(true);
+    await controller.screenshot({ path: "test-results/mobile-controller-library.png", fullPage: true });
+
+    await controller.setViewportSize({ width: 1440, height: 900 });
+    const desktopLayout = await controller.evaluate(() => {
+      const player = document.querySelector<HTMLElement>(".companion-player")?.getBoundingClientRect();
+      const controller = document.querySelector<HTMLElement>(".controller-panel")?.getBoundingClientRect();
+      return {
+        ordered: Boolean(player && controller && player.right <= controller.left),
+        noHorizontalOverflow: document.documentElement.scrollWidth <= window.innerWidth,
+      };
+    });
+    expect(desktopLayout).toEqual({ ordered: true, noHorizontalOverflow: true });
+    await controller.screenshot({ path: "test-results/desktop-controller.png", fullPage: true });
+    await controller.setViewportSize({ width: 390, height: 844 });
+
     const remotePlayPause = controller.getByTestId("remote-play-pause");
     if ((await remotePlayPause.textContent()) === "Play") {
       await remotePlayPause.click();
@@ -193,8 +224,11 @@ test("streams from the laptop while enforcing listener and controller roles", as
     await controller.getByRole("button", { name: "Add tracks", exact: true }).click();
     const pickerRows = controller.locator(".playlist-track-picker li");
     await pickerRows.nth(0).getByRole("button", { name: "Add", exact: true }).click();
+    await expect(pickerRows.nth(0).getByRole("button", { name: "Added", exact: true })).toBeDisabled();
     await pickerRows.nth(1).getByRole("button", { name: "Add", exact: true }).click();
+    await expect(pickerRows.nth(1).getByRole("button", { name: "Added", exact: true })).toBeDisabled();
     const closePicker = controller.getByRole("button", { name: "Close track picker", exact: true });
+    await expect(closePicker).toBeVisible();
     await closePicker.scrollIntoViewIfNeeded();
     const touchTarget = await closePicker.boundingBox();
     expect(touchTarget?.height ?? 0).toBeGreaterThanOrEqual(44);

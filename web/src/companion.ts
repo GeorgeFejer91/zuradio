@@ -2,6 +2,7 @@ import "./style.css";
 
 import type { Action, AppSnapshot, ImportedFile, Playlist, RemoteMode } from "./types";
 import { isSupportedAudioFileName, SUPPORTED_AUDIO_ACCEPT } from "./formats";
+import { icon } from "./icons";
 import { CompanionBridge, type PublicNowPlaying } from "./vdo";
 import { renderSoundVisualizer, SvgSoundVisualizer } from "./visualizer";
 
@@ -39,6 +40,7 @@ let pendingPlaylistSelection: Set<string> | null = null;
 let playlistPickerOpen = false;
 let playlistSearch = "";
 let renamingPlaylistId: string | null = null;
+let commandTail: Promise<void> = Promise.resolve();
 
 history.replaceState(null, "", `${location.pathname}${location.search}`);
 
@@ -347,19 +349,27 @@ async function uploadSelectedFiles(): Promise<void> {
   }
 }
 
-async function send(action: Action): Promise<boolean> {
-  busy = true;
+function send(action: Action): Promise<boolean> {
+  const operation = commandTail.then(
+    () => sendNow(action),
+    () => sendNow(action),
+  );
+  commandTail = operation.then(
+    () => undefined,
+    () => undefined,
+  );
+  return operation;
+}
+
+async function sendNow(action: Action): Promise<boolean> {
   errorMessage = "";
-  render();
   try {
     await bridge.send(action);
     return true;
   } catch (error) {
     errorMessage = messageOf(error);
-    return false;
-  } finally {
-    busy = false;
     render();
+    return false;
   }
 }
 
@@ -375,11 +385,11 @@ async function renamePlaylist(playlistId: string, name: string): Promise<void> {
 
 function render(): void {
   const mode = bridge.mode ?? selectedMode;
-  root.innerHTML = `<main class="companion-shell" aria-busy="${busy}">
-    <header class="companion-header"><div><span class="wordmark">ZURADIO</span><h1>Web Companion</h1></div>${connected ? `<span class="connection-live">${capitalize(mode ?? "listen")}</span>` : ""}</header>
-    ${connected ? `<section class="connection-panel"><div class="section-header"><div><span class="eyebrow">Connected</span><p class="muted">${escapeHtml(connectionStatus)}</p></div><button data-action="disconnect" ${disabled()}>Disconnect</button></div></section>` : renderConnectionModes()}
+  root.innerHTML = `<main class="companion-shell ${connected ? `is-connected is-${mode ?? "listen"}` : "is-landing"}" aria-busy="${busy}">
+    <header class="companion-header"><div class="companion-brand"><span class="brand-mark">${icon("music")}</span><div><span class="wordmark">ZURADIO</span><h1>Web Companion</h1></div></div>${connected ? `<span class="connection-live">${capitalize(mode ?? "listen")}</span>` : ""}</header>
+    ${connected ? `<section class="connection-panel connected-strip"><div class="connection-summary"><span class="broadcast-indicator active"></span><div><strong>${escapeHtml(connectionStatus)}</strong><span>Linked directly to the laptop</span></div></div><button data-action="disconnect" ${disabled()}>Disconnect</button></section>` : renderConnectionModes()}
     ${connected && mode !== "upload" ? `<section class="companion-player">
-      <h2>Now playing</h2>
+      <div class="companion-player-heading"><h2>Now playing</h2><span>${mode === "control" ? "Laptop output" : "Live stream"}</span></div>
       ${renderNowPlaying()}
       ${renderSoundVisualizer("companion-visualizer")}
       <div data-audio-mount></div>
@@ -404,9 +414,9 @@ function renderConnectionModes(): string {
     <p class="muted">${trustedUntil ? "This browser is trusted. Choose a mode to connect without entering the password again." : "The password finds your active Zuradio laptop and opens only the mode you select."}</p>
     ${trustedUntil ? `<div class="trusted-device" data-testid="trusted-device"><span>Trusted until ${escapeHtml(formatTrustedUntil(trustedUntil))}</span><button data-action="forget-device">Forget this browser</button></div>` : ""}
     <div class="connect-modes">
-      <button data-action="choose-mode" data-mode="listen" data-testid="connect-listen"><span>01</span><strong>Listen</strong><small>Hear the live stream</small></button>
-      <button data-action="choose-mode" data-mode="control" data-testid="connect-control"><span>02</span><strong>Control</strong><small>Player, queue and playlists</small></button>
-      <button data-action="choose-mode" data-mode="upload" data-testid="connect-upload"><span>03</span><strong>Upload</strong><small>Add music to the laptop</small></button>
+      <button data-action="choose-mode" data-mode="listen" data-testid="connect-listen"><span>${icon("volume")}</span><strong>Listen</strong><small>Hear the live stream</small></button>
+      <button data-action="choose-mode" data-mode="control" data-testid="connect-control"><span>${icon("library")}</span><strong>Control</strong><small>Player, queue and playlists</small></button>
+      <button data-action="choose-mode" data-mode="upload" data-testid="connect-upload"><span>${icon("upload")}</span><strong>Upload</strong><small>Add music to the laptop</small></button>
     </div>
   </section>`;
 }
@@ -445,7 +455,7 @@ function renderRenamePlaylistDialog(playlistId: string): string {
 
 function renderUpload(): string {
   return `<section class="upload-panel">
-    <div class="section-header"><div><h2>Add music to this laptop</h2><p class="muted">Files travel directly through the encrypted live bridge. GitHub Pages never stores the music.</p></div></div>
+    <div class="upload-heading"><span class="upload-mark">${icon("upload")}</span><div><h2>Add music to this laptop</h2><p class="muted">Files travel directly through the encrypted live bridge. GitHub Pages never stores the music.</p></div></div>
     <div class="upload-picker">
       <label class="button" for="upload-files">Choose files</label>
       <input id="upload-files" data-upload-files type="file" multiple accept="${SUPPORTED_AUDIO_ACCEPT}" />
@@ -463,13 +473,14 @@ function renderNowPlaying(): string {
   const currentTrack = snapshot?.tracks.find((track) => track.id === snapshot?.player.currentTrackId);
   const title = currentTrack?.title ?? publicState?.track?.title ?? "Nothing playing";
   const artist = currentTrack?.artist ?? publicState?.track?.artist ?? "Waiting for the laptop";
-  return `<div class="now-playing"><strong data-testid="companion-title">${escapeHtml(title)}</strong><span>${escapeHtml(artist)}</span></div>`;
+  const album = currentTrack?.album ?? publicState?.track?.album ?? "Zuradio live";
+  return `<div class="companion-now-playing"><div class="companion-cover tone-${coverTone(`${artist}-${album}`)}"><span class="cover-grooves" aria-hidden="true"></span><strong>${escapeHtml(coverInitials(album || title))}</strong></div><div class="now-playing"><strong data-testid="companion-title">${escapeHtml(title)}</strong><span>${escapeHtml(artist)}</span><small>${escapeHtml(album)}</small></div></div>`;
 }
 
 function renderStreamAudioControls(): string {
   return `<div class="stream-audio-controls" aria-label="Stream audio controls">
-    <button data-action="toggle-stream-audio">${audio.paused ? "Hear stream" : "Pause stream"}</button>
-    <button data-action="toggle-stream-mute">${audio.muted ? "Unmute stream" : "Mute stream"}</button>
+    <button data-action="toggle-stream-audio">${icon(audio.paused ? "play" : "pause")}<span>${audio.paused ? "Hear stream" : "Pause stream"}</span></button>
+    <button data-action="toggle-stream-mute">${icon(audio.muted ? "volumeOff" : "volume")}<span>${audio.muted ? "Unmute stream" : "Mute stream"}</span></button>
     <label><span>Stream volume</span><input data-stream-volume type="range" min="0" max="100" value="${Math.round(audio.volume * 100)}" /></label>
   </div>`;
 }
@@ -478,15 +489,9 @@ function renderTransport(state: AppSnapshot): string {
   const track = state.tracks.find((candidate) => candidate.id === state.player.currentTrackId);
   const playing = state.player.status === "playing";
   return `<div class="companion-transport" aria-label="Remote player controls">
-    <button data-action="previous" aria-label="Previous">⏮</button>
-    <button class="primary" data-action="${playing ? "pause" : "play"}" data-testid="remote-play-pause">${playing ? "Pause" : "Play"}</button>
-    <button data-action="next" aria-label="Next">⏭</button>
-    <button data-action="stop">Stop</button>
-    <button class="${state.player.shuffle ? "active" : ""}" data-action="shuffle" aria-pressed="${state.player.shuffle}">Shuffle</button>
-    <button class="${state.player.repeat !== "off" ? "active" : ""}" data-action="repeat" aria-label="Repeat mode: ${state.player.repeat}">Repeat ${state.player.repeat}</button>
-    <button data-action="mute">${state.player.muted ? "Unmute" : "Mute"}</button>
-    <input data-volume type="range" min="0" max="100" value="${state.player.volume}" aria-label="Laptop volume" />
-    <input data-seek type="range" min="0" max="${Math.max(track?.durationMs ?? 0, 1)}" value="${Math.min(state.player.positionMs, track?.durationMs ?? 0)}" aria-label="Seek position" ${track ? "" : "disabled"} />
+    <div class="remote-transport-main"><button class="icon" data-action="previous" aria-label="Previous">${icon("previous")}</button><button class="primary remote-primary" data-action="${playing ? "pause" : "play"}" data-testid="remote-play-pause">${icon(playing ? "pause" : "play")}<span>${playing ? "Pause" : "Play"}</span></button><button class="icon" data-action="next" aria-label="Next">${icon("next")}</button><button class="icon" data-action="stop" aria-label="Stop">${icon("stop")}</button></div>
+    <input class="remote-seek" data-seek type="range" min="0" max="${Math.max(track?.durationMs ?? 0, 1)}" value="${Math.min(state.player.positionMs, track?.durationMs ?? 0)}" aria-label="Seek position" ${track ? "" : "disabled"} />
+    <div class="remote-options"><button class="${state.player.shuffle ? "active" : ""}" data-action="shuffle" aria-pressed="${state.player.shuffle}">${icon("shuffle")}<span>Shuffle</span></button><button class="${state.player.repeat !== "off" ? "active" : ""}" data-action="repeat" aria-label="Repeat mode: ${state.player.repeat}">${icon("repeat")}<span>Repeat ${state.player.repeat}</span></button><button data-action="mute">${icon(state.player.muted ? "volumeOff" : "volume")}<span>${state.player.muted ? "Unmute" : "Mute"}</span></button><input data-volume type="range" min="0" max="100" value="${state.player.volume}" aria-label="Laptop volume" /></div>
   </div>`;
 }
 
@@ -494,10 +499,10 @@ function renderController(state: AppSnapshot): string {
   return `<section class="controller-panel">
     <nav class="nav" aria-label="Controller sections">
       ${(["library", "queue", "playlists"] as ControllerView[])
-        .map((item) => `<button data-action="view" data-view="${item}" aria-current="${view === item ? "page" : "false"}">${capitalize(item)}</button>`)
+        .map((item) => `<button data-action="view" data-view="${item}" aria-current="${view === item ? "page" : "false"}">${icon(item === "library" ? "library" : item === "queue" ? "queue" : "playlist")}<span>${capitalize(item)}</span></button>`)
         .join("")}
     </nav>
-    ${view === "library" ? renderLibrary(state) : view === "queue" ? renderQueue(state) : renderPlaylists(state)}
+    <div class="controller-view">${view === "library" ? renderLibrary(state) : view === "queue" ? renderQueue(state) : renderPlaylists(state)}</div>
   </section>`;
 }
 
@@ -507,19 +512,19 @@ function renderLibrary(state: AppSnapshot): string {
     !query || [track.title, track.artist, track.album].some((value) => value.toLocaleLowerCase().includes(query)),
   );
   const selected = state.playlists.find((playlist) => playlist.id === selectedPlaylistId) ?? state.playlists[0];
-  return `<input class="search" data-search type="search" value="${escapeAttribute(search)}" placeholder="Search library" aria-label="Search library" />
-    <ol class="track-list">${tracks
+  return `<div class="controller-view-header"><div><h2>Library</h2><span>${tracks.length} track${tracks.length === 1 ? "" : "s"}</span></div><label class="toolbar-search">${icon("library")}<input class="search" data-search type="search" value="${escapeAttribute(search)}" placeholder="Search library" aria-label="Search library" /></label></div>
+    <div class="track-table-head companion-track-head" aria-hidden="true"><span>#</span><span>Title</span><span>Artist</span><span>Album</span><span>Time</span><span></span></div><ol class="track-list music-track-list">${tracks
       .map(
         (track) => `<li class="track-row">
-          <button class="icon" data-action="play-track" data-track-id="${escapeAttribute(track.id)}" aria-label="Play ${escapeAttribute(track.title)}">▶</button>
+          <button class="track-cover-button" data-action="play-track" data-track-id="${escapeAttribute(track.id)}" aria-label="Play ${escapeAttribute(track.title)}"><span class="track-cover cover-placeholder tone-${coverTone(`${track.artist}-${track.album}`)}">${escapeHtml(coverInitials(track.album || track.title))}</span><span class="track-play-overlay">${icon("play")}</span></button>
           <div class="track-title"><strong>${escapeHtml(track.title)}</strong><span>${escapeHtml(track.artist)}</span></div>
           <div class="track-cell track-artist">${escapeHtml(track.artist)}</div>
           <div class="track-cell track-album">${escapeHtml(track.album)}</div>
           <div class="track-duration">${formatTime(track.durationMs)}</div>
           <div class="track-actions">
-            <button data-action="favorite" data-track-id="${escapeAttribute(track.id)}" data-enabled="${!state.favorites.includes(track.id)}" aria-label="${state.favorites.includes(track.id) ? "Remove from" : "Add to"} favorites">${state.favorites.includes(track.id) ? "★" : "☆"}</button>
-            <button data-action="queue-add" data-track-id="${escapeAttribute(track.id)}" aria-label="Add ${escapeAttribute(track.title)} to queue">＋</button>
-            ${selected ? `<button data-action="playlist-add" data-playlist-id="${escapeAttribute(selected.id)}" data-track-id="${escapeAttribute(track.id)}" aria-label="Add to ${escapeAttribute(selected.name)}">↳</button>` : ""}
+            <button class="${state.favorites.includes(track.id) ? "active" : ""}" data-action="favorite" data-track-id="${escapeAttribute(track.id)}" data-enabled="${!state.favorites.includes(track.id)}" aria-label="${state.favorites.includes(track.id) ? "Remove from" : "Add to"} favorites">${icon("heart")}</button>
+            <button data-action="queue-add" data-track-id="${escapeAttribute(track.id)}" aria-label="Add ${escapeAttribute(track.title)} to queue">${icon("queue")}</button>
+            ${selected ? `<button data-action="playlist-add" data-playlist-id="${escapeAttribute(selected.id)}" data-track-id="${escapeAttribute(track.id)}" aria-label="Add to ${escapeAttribute(selected.name)}">${icon("playlist")}</button>` : ""}
           </div>
         </li>`,
       )
@@ -528,12 +533,12 @@ function renderLibrary(state: AppSnapshot): string {
 
 function renderQueue(state: AppSnapshot): string {
   const byId = new Map(state.tracks.map((track) => [track.id, track]));
-  return `<div class="section-header"><h2>Queue</h2><button data-action="queue-clear" ${state.player.queue.length ? "" : "disabled"}>Clear</button></div>
+  return `<div class="controller-view-header"><div><h2>Queue</h2><span>${state.player.queue.length} track${state.player.queue.length === 1 ? "" : "s"}</span></div><button data-action="queue-clear" ${state.player.queue.length ? "" : "disabled"}>Clear</button></div>
     <ol class="queue-list">${state.player.queue
       .map((id, index) => {
         const track = byId.get(id);
         const title = track?.title ?? "Unavailable";
-        return `<li class="queue-item${index === state.player.queueCursor ? " current" : ""}"><span>${index + 1}</span><span class="track-title"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(track?.artist ?? "")}</span></span><span class="queue-buttons"><button data-action="queue-move" data-from="${index}" data-to="${Math.max(0, index - 1)}" aria-label="Move ${escapeAttribute(title)} up" ${index === 0 ? "disabled" : ""}>↑</button><button data-action="queue-move" data-from="${index}" data-to="${Math.min(state.player.queue.length - 1, index + 1)}" aria-label="Move ${escapeAttribute(title)} down" ${index === state.player.queue.length - 1 ? "disabled" : ""}>↓</button><button data-action="queue-remove" data-index="${index}" aria-label="Remove ${escapeAttribute(title)} from queue">×</button></span></li>`;
+        return `<li class="queue-item${index === state.player.queueCursor ? " current" : ""}"><span>${index + 1}</span><span class="track-title"><strong>${escapeHtml(title)}</strong><span>${escapeHtml(track?.artist ?? "")}</span></span><span class="queue-buttons"><button data-action="queue-move" data-from="${index}" data-to="${Math.max(0, index - 1)}" aria-label="Move ${escapeAttribute(title)} up" ${index === 0 ? "disabled" : ""}>${icon("chevronUp")}</button><button data-action="queue-move" data-from="${index}" data-to="${Math.min(state.player.queue.length - 1, index + 1)}" aria-label="Move ${escapeAttribute(title)} down" ${index === state.player.queue.length - 1 ? "disabled" : ""}>${icon("chevronDown")}</button><button data-action="queue-remove" data-index="${index}" aria-label="Remove ${escapeAttribute(title)} from queue">${icon("close")}</button></span></li>`;
       })
       .join("")}</ol>`;
 }
@@ -568,6 +573,15 @@ function renderPlaylists(state: AppSnapshot): string {
 
 function playlistById(id: string | undefined): Playlist | undefined {
   return snapshot?.playlists.find((playlist) => playlist.id === id);
+}
+
+function coverInitials(value: string): string {
+  const words = value.trim().split(/\s+/).filter(Boolean);
+  return (words.length > 1 ? `${words[0]?.[0] ?? ""}${words[1]?.[0] ?? ""}` : words[0]?.slice(0, 2) ?? "ZU").toLocaleUpperCase();
+}
+
+function coverTone(value: string): number {
+  return [...value].reduce((sum, character) => sum + (character.codePointAt(0) ?? 0), 0) % 4;
 }
 
 function numeric(value: string | undefined): number | null {

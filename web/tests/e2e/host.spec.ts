@@ -225,6 +225,23 @@ test("starts broadcasting automatically when the host opens", async ({ page }) =
 });
 
 test("is keyboard reachable and responsive at phone width", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto(`${runtime.baseUrl}/host/#autobroadcast=0`);
+  await expect(page.locator(".track-table-head")).toBeVisible();
+  const desktopLayout = await page.evaluate(() => {
+    const sidebar = document.querySelector<HTMLElement>(".sidebar")?.getBoundingClientRect();
+    const content = document.querySelector<HTMLElement>(".content")?.getBoundingClientRect();
+    const queue = document.querySelector<HTMLElement>(".right-panel")?.getBoundingClientRect();
+    const player = document.querySelector<HTMLElement>(".player")?.getBoundingClientRect();
+    return {
+      ordered: Boolean(sidebar && content && queue && sidebar.right <= content.left && content.right <= queue.left),
+      playerAtBottom: Boolean(player && Math.abs(player.bottom - window.innerHeight) <= 2),
+      noHorizontalOverflow: document.documentElement.scrollWidth <= window.innerWidth,
+    };
+  });
+  expect(desktopLayout).toEqual({ ordered: true, playerAtBottom: true, noHorizontalOverflow: true });
+  await page.screenshot({ path: "test-results/desktop-host.png", fullPage: true });
+
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`${runtime.baseUrl}/host/#autobroadcast=0`);
   await expect(page.getByTestId("search")).toBeVisible();
@@ -232,6 +249,19 @@ test("is keyboard reachable and responsive at phone width", async ({ page }) => 
   await expect(page.locator('[aria-label^="Repeat mode:"]')).toBeVisible();
   await expect(page.getByTestId("volume")).toBeVisible();
   await expect(page.locator(".right-panel")).toBeVisible();
+  await expect(page.locator(".track-cover").first()).toBeVisible();
+  const mobileLayout = await page.evaluate(() => {
+    const player = document.querySelector<HTMLElement>(".player")?.getBoundingClientRect();
+    const primary = document.querySelector<HTMLElement>(".player-primary")?.getBoundingClientRect();
+    return {
+      playerAtBottom: Boolean(player && Math.abs(player.bottom - window.innerHeight) <= 2),
+      primaryTouchTarget: primary?.height ?? 0,
+      noHorizontalOverflow: document.documentElement.scrollWidth <= window.innerWidth,
+    };
+  });
+  expect(mobileLayout.playerAtBottom).toBe(true);
+  expect(mobileLayout.primaryTouchTarget).toBeGreaterThanOrEqual(44);
+  expect(mobileLayout.noHorizontalOverflow).toBe(true);
   await page.keyboard.press("Tab");
   const focused = await page.evaluate(() => document.activeElement?.tagName);
   expect(["BUTTON", "INPUT"]).toContain(focused);

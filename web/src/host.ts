@@ -2,6 +2,7 @@ import "./style.css";
 
 import { ZuradioApi } from "./api";
 import { AudioEngine } from "./audio-engine";
+import { icon, type IconName } from "./icons";
 import type { Action, AppSnapshot, BroadcastSession, Playlist, Track } from "./types";
 import { HostBroadcastBridge } from "./vdo";
 import { renderSoundVisualizer, SvgSoundVisualizer } from "./visualizer";
@@ -166,6 +167,12 @@ async function handleClick(target: HTMLElement): Promise<void> {
   }
   if (action === "select-playlist") {
     selectedPlaylistId = target.dataset.playlistId ?? null;
+    render();
+    return;
+  }
+  if (action === "open-playlist") {
+    selectedPlaylistId = target.dataset.playlistId ?? null;
+    view = "playlists";
     render();
     return;
   }
@@ -378,13 +385,13 @@ function render(): void {
     return;
   }
   root.innerHTML = `
-    <div class="shell" aria-busy="${busy}">
+    <div class="shell view-${view}" aria-busy="${busy}">
       ${renderSidebar(snapshot)}
       <main class="main">
         <div class="toolbar">
-          <input class="search" data-search data-testid="search" type="search" value="${escapeAttribute(search)}" placeholder="Search title, artist, or album" aria-label="Search library" />
+          <label class="toolbar-search">${icon("library")}<input class="search" data-search data-testid="search" type="search" value="${escapeAttribute(search)}" placeholder="Search title, artist, or album" aria-label="Search library" /></label>
           <span class="toolbar-spacer"></span>
-          <button data-action="scan" data-testid="scan-library" ${disabled()}>Scan library</button>
+          <button class="scan-button" data-action="scan" data-testid="scan-library" ${disabled()}>${icon("scan")}<span>Scan library</span></button>
         </div>
         <div class="content">${renderContent(snapshot)}</div>
       </main>
@@ -399,26 +406,31 @@ function render(): void {
 }
 
 function renderSidebar(state: AppSnapshot): string {
-  const items: Array<[View, string, number | string]> = [
-    ["library", "Library", state.tracks.length],
-    ["albums", "Albums", unique(state.tracks.map((track) => track.album)).length],
-    ["artists", "Artists", unique(state.tracks.map((track) => track.artist)).length],
-    ["playlists", "Playlists", state.playlists.length],
-    ["favorites", "Favorites", state.favorites.length],
-    ["history", "History", state.history.length],
-    ["broadcast", "Broadcast", broadcastSession ? "On" : "Off"],
+  const items: Array<[View, string, number | string, IconName]> = [
+    ["library", "Library", state.tracks.length, "library"],
+    ["albums", "Albums", unique(state.tracks.map((track) => track.album)).length, "album"],
+    ["artists", "Artists", unique(state.tracks.map((track) => track.artist)).length, "artist"],
+    ["playlists", "Playlists", state.playlists.length, "playlist"],
+    ["favorites", "Favorites", state.favorites.length, "heart"],
+    ["history", "History", state.history.length, "history"],
+    ["broadcast", "Broadcast", broadcastSession ? "On" : "Off", "broadcast"],
   ];
   return `<aside class="sidebar">
-    <div class="brand"><h1>Zuradio</h1><p>Music on this laptop</p></div>
+    <div class="brand"><span class="brand-mark">${icon("music")}</span><div><h1>Zuradio</h1><p>Music on this laptop</p></div></div>
     <nav class="nav" aria-label="Music library">
       ${items
         .map(
-          ([id, label, count]) => `<button data-action="nav" data-view="${id}" aria-current="${view === id ? "page" : "false"}">
-            <span>${label}</span><span class="nav-count">${count}</span>
+          ([id, label, count, iconName]) => `<button data-action="nav" data-view="${id}" aria-label="${label}${id === "broadcast" ? ` ${count}` : ""}" aria-current="${view === id ? "page" : "false"}">
+            ${icon(iconName)}<span class="nav-label">${label}</span><span class="nav-count">${count}</span>
           </button>`,
         )
         .join("")}
     </nav>
+    <section class="sidebar-playlists" aria-label="Saved playlists">
+      <div class="sidebar-section-title"><span>Saved playlists</span><span>${state.playlists.length}</span></div>
+      ${state.playlists.length ? state.playlists.slice(0, 7).map((playlist) => `<button data-action="open-playlist" data-playlist-id="${escapeAttribute(playlist.id)}" aria-label="Open ${escapeAttribute(playlist.name)}"><span class="playlist-glyph tone-${coverTone(playlist.name)}">${escapeHtml(coverInitials(playlist.name))}</span><span>${escapeHtml(playlist.name)}</span></button>`).join("") : `<p>No playlists yet</p>`}
+    </section>
+    <div class="sidebar-status"><span class="broadcast-indicator${broadcastSession ? " active" : ""}"></span><span>${broadcastSession ? "Laptop broadcasting" : "Broadcast offline"}</span></div>
   </aside>`;
 }
 
@@ -446,24 +458,24 @@ function renderContent(state: AppSnapshot): string {
 }
 
 function renderTrackSection(title: string, tracks: Track[], state: AppSnapshot): string {
-  return `<div class="section-header"><h2>${title}</h2><span class="muted">${tracks.length} tracks</span></div>
-    ${tracks.length ? `<ol class="track-list">${tracks.map((track) => renderTrack(track, state)).join("")}</ol>` : renderEmpty("No matching tracks")}`;
+  return `<div class="section-header library-header"><div><h2>${title}</h2><p class="muted">${tracks.length} track${tracks.length === 1 ? "" : "s"} in this collection</p></div></div>
+    ${tracks.length ? `<div class="track-table-head" aria-hidden="true"><span>#</span><span>Title</span><span>Artist</span><span>Album</span><span>Time</span><span></span></div><ol class="track-list music-track-list">${tracks.map((track) => renderTrack(track, state)).join("")}</ol>` : renderEmpty("No matching tracks")}`;
 }
 
 function renderTrack(track: Track, state: AppSnapshot): string {
   const favorite = state.favorites.includes(track.id);
   const playlist = selectedPlaylistId ? state.playlists.find((item) => item.id === selectedPlaylistId) : state.playlists[0];
   return `<li class="track-row" data-track-row="${escapeAttribute(track.id)}">
-    <button class="icon" data-action="play-track" data-track-id="${escapeAttribute(track.id)}" aria-label="Play ${escapeAttribute(track.title)}" title="Play">▶</button>
+    <button class="track-cover-button" data-action="play-track" data-track-id="${escapeAttribute(track.id)}" aria-label="Play ${escapeAttribute(track.title)}" title="Play">${renderCover(track, "track-cover")}<span class="track-play-overlay">${icon("play")}</span></button>
     <div class="track-title"><strong>${escapeHtml(track.title)}</strong><span>${escapeHtml(track.format.toUpperCase())}${track.year ? ` · ${track.year}` : ""}</span></div>
     <div class="track-cell track-artist">${escapeHtml(track.artist)}</div>
     <div class="track-cell track-album">${escapeHtml(track.album)}</div>
     <div class="track-duration">${formatTime(track.durationMs)}</div>
     <div class="track-actions">
-      <button data-action="favorite" data-track-id="${escapeAttribute(track.id)}" data-enabled="${!favorite}" aria-label="${favorite ? "Remove from" : "Add to"} favorites" title="Favorite">${favorite ? "★" : "☆"}</button>
-      <button data-action="queue-add" data-track-id="${escapeAttribute(track.id)}" aria-label="Add ${escapeAttribute(track.title)} to queue" title="Add to queue">＋</button>
-      ${playlist ? `<button data-action="playlist-add" data-playlist-id="${escapeAttribute(playlist.id)}" data-track-id="${escapeAttribute(track.id)}" aria-label="Add to ${escapeAttribute(playlist.name)}" title="Add to ${escapeAttribute(playlist.name)}">↳</button>` : ""}
-      <button data-action="edit-track" data-track-id="${escapeAttribute(track.id)}" aria-label="Edit metadata for ${escapeAttribute(track.title)}" title="Edit metadata">✎</button>
+      <button class="${favorite ? "active" : ""}" data-action="favorite" data-track-id="${escapeAttribute(track.id)}" data-enabled="${!favorite}" aria-label="${favorite ? "Remove from" : "Add to"} favorites" title="Favorite">${icon("heart")}</button>
+      <button data-action="queue-add" data-track-id="${escapeAttribute(track.id)}" aria-label="Add ${escapeAttribute(track.title)} to queue" title="Add to queue">${icon("queue")}</button>
+      ${playlist ? `<button data-action="playlist-add" data-playlist-id="${escapeAttribute(playlist.id)}" data-track-id="${escapeAttribute(track.id)}" aria-label="Add to ${escapeAttribute(playlist.name)}" title="Add to ${escapeAttribute(playlist.name)}">${icon("playlist")}</button>` : ""}
+      <button data-action="edit-track" data-track-id="${escapeAttribute(track.id)}" aria-label="Edit metadata for ${escapeAttribute(track.title)}" title="Edit metadata">${icon("edit")}</button>
     </div>
   </li>`;
 }
@@ -492,10 +504,10 @@ function renderMetadataEditor(state: AppSnapshot): string {
 
 function renderGroups(title: string, groups: Map<string, Track[]>): string {
   const ordered = [...groups.entries()].sort(([left], [right]) => left.localeCompare(right));
-  return `<div class="section-header"><h2>${title}</h2><span class="muted">${ordered.length}</span></div>
+  return `<div class="section-header library-header"><div><h2>${title}</h2><p class="muted">${ordered.length} ${title.toLocaleLowerCase()}</p></div></div>
     ${ordered.length ? `<ul class="group-list">${ordered
       .map(
-        ([name, tracks]) => `<li class="group-item"><button data-action="group" data-query="${escapeAttribute(name)}"><strong>${escapeHtml(name)}</strong></button><p>${tracks.length} track${tracks.length === 1 ? "" : "s"}</p></li>`,
+        ([name, tracks]) => `<li class="group-item"><button data-action="group" data-query="${escapeAttribute(name)}" aria-label="${escapeAttribute(name)}"><span class="group-cover">${tracks[0] ? renderCover(tracks[0], "group-cover-art") : ""}</span><span class="group-copy"><strong>${escapeHtml(name)}</strong><span>${tracks.length} track${tracks.length === 1 ? "" : "s"}</span></span></button></li>`,
       )
       .join("")}</ul>` : renderEmpty(`No ${title.toLowerCase()} yet`)}`;
 }
@@ -503,7 +515,7 @@ function renderGroups(title: string, groups: Map<string, Track[]>): string {
 function renderPlaylists(state: AppSnapshot): string {
   const selected = state.playlists.find((playlist) => playlist.id === selectedPlaylistId) ?? state.playlists[0];
   if (selected && selected.id !== selectedPlaylistId) selectedPlaylistId = selected.id;
-  return `<div class="section-header"><h2>Playlists</h2><span class="muted">Stored on this laptop</span></div>
+  return `<div class="section-header library-header"><div><h2>Playlists</h2><p class="muted">Saved on this laptop · ${state.playlists.length} total</p></div></div>
     <form class="inline-form" data-playlist-form>
       <input name="playlistName" data-testid="playlist-name" maxlength="80" required placeholder="New playlist name" aria-label="New playlist name" />
       <button class="primary" data-testid="create-playlist" ${disabled()}>Create</button>
@@ -515,8 +527,8 @@ function renderPlaylists(state: AppSnapshot): string {
             (playlist) => `<li>
               <button class="select-playlist${selected?.id === playlist.id ? " selected" : ""}" data-action="select-playlist" data-playlist-id="${escapeAttribute(playlist.id)}">${escapeHtml(playlist.name)} <span class="muted">${playlist.trackIds.length}</span></button>
               <span class="row-actions">
-                <button data-action="rename-playlist" data-playlist-id="${escapeAttribute(playlist.id)}" aria-label="Rename ${escapeAttribute(playlist.name)}">✎</button>
-                <button class="danger" data-action="delete-playlist" data-playlist-id="${escapeAttribute(playlist.id)}" aria-label="Delete ${escapeAttribute(playlist.name)}">×</button>
+                <button data-action="rename-playlist" data-playlist-id="${escapeAttribute(playlist.id)}" aria-label="Rename ${escapeAttribute(playlist.name)}">${icon("edit")}</button>
+                <button class="danger" data-action="delete-playlist" data-playlist-id="${escapeAttribute(playlist.id)}" aria-label="Delete ${escapeAttribute(playlist.name)}">${icon("close")}</button>
               </span>
             </li>`,
           )
@@ -536,9 +548,9 @@ function renderPlaylistTracks(playlist: Playlist, state: AppSnapshot): string {
           <span class="queue-index">${index + 1}</span>
           <span class="track-title"><strong>${escapeHtml(track?.title ?? "Unavailable track")}</strong><span>${escapeHtml(track?.artist ?? "Not currently mounted")}</span></span>
           <span class="queue-buttons">
-            <button data-action="playlist-move" data-playlist-id="${escapeAttribute(playlist.id)}" data-from="${index}" data-to="${Math.max(0, index - 1)}" aria-label="Move up" ${index === 0 ? "disabled" : ""}>↑</button>
-            <button data-action="playlist-move" data-playlist-id="${escapeAttribute(playlist.id)}" data-from="${index}" data-to="${Math.min(playlist.trackIds.length - 1, index + 1)}" aria-label="Move down" ${index === playlist.trackIds.length - 1 ? "disabled" : ""}>↓</button>
-            <button data-action="playlist-remove" data-playlist-id="${escapeAttribute(playlist.id)}" data-index="${index}" aria-label="Remove from playlist">×</button>
+            <button data-action="playlist-move" data-playlist-id="${escapeAttribute(playlist.id)}" data-from="${index}" data-to="${Math.max(0, index - 1)}" aria-label="Move up" ${index === 0 ? "disabled" : ""}>${icon("chevronUp")}</button>
+            <button data-action="playlist-move" data-playlist-id="${escapeAttribute(playlist.id)}" data-from="${index}" data-to="${Math.min(playlist.trackIds.length - 1, index + 1)}" aria-label="Move down" ${index === playlist.trackIds.length - 1 ? "disabled" : ""}>${icon("chevronDown")}</button>
+            <button data-action="playlist-remove" data-playlist-id="${escapeAttribute(playlist.id)}" data-index="${index}" aria-label="Remove from playlist">${icon("close")}</button>
           </span>
         </li>`;
       })
@@ -574,7 +586,7 @@ function renderBroadcast(): string {
 
 function renderQueue(state: AppSnapshot): string {
   const byId = new Map(state.tracks.map((track) => [track.id, track]));
-  return `<aside class="right-panel"><div class="right-header"><h2>Queue</h2><button data-action="queue-clear" ${state.player.queue.length ? "" : "disabled"}>Clear</button></div>
+  return `<aside class="right-panel"><div class="right-header"><div><h2>Queue</h2><span>${state.player.queue.length} track${state.player.queue.length === 1 ? "" : "s"}</span></div><button data-action="queue-clear" ${state.player.queue.length ? "" : "disabled"}>Clear</button></div>
     ${state.player.queue.length ? `<ol class="queue-list">${state.player.queue
       .map((id, index) => {
         const track = byId.get(id);
@@ -582,9 +594,9 @@ function renderQueue(state: AppSnapshot): string {
           <span class="queue-index">${index + 1}</span>
           <span class="track-title"><strong>${escapeHtml(track?.title ?? "Unavailable")}</strong><span>${escapeHtml(track?.artist ?? "")}</span></span>
           <span class="queue-buttons">
-            <button data-action="queue-move" data-from="${index}" data-to="${Math.max(0, index - 1)}" aria-label="Move up" ${index === 0 ? "disabled" : ""}>↑</button>
-            <button data-action="queue-move" data-from="${index}" data-to="${Math.min(state.player.queue.length - 1, index + 1)}" aria-label="Move down" ${index === state.player.queue.length - 1 ? "disabled" : ""}>↓</button>
-            <button data-action="queue-remove" data-index="${index}" aria-label="Remove from queue">×</button>
+            <button data-action="queue-move" data-from="${index}" data-to="${Math.max(0, index - 1)}" aria-label="Move up" ${index === 0 ? "disabled" : ""}>${icon("chevronUp")}</button>
+            <button data-action="queue-move" data-from="${index}" data-to="${Math.min(state.player.queue.length - 1, index + 1)}" aria-label="Move down" ${index === state.player.queue.length - 1 ? "disabled" : ""}>${icon("chevronDown")}</button>
+            <button data-action="queue-remove" data-index="${index}" aria-label="Remove from queue">${icon("close")}</button>
           </span>
         </li>`;
       })
@@ -597,17 +609,17 @@ function renderPlayer(state: AppSnapshot): string {
   const duration = track?.durationMs ?? 0;
   const playing = state.player.status === "playing";
   return `<footer class="player" aria-label="Player controls">
-    <div class="now-playing${track?.hasArtwork ? " has-artwork" : ""}">
-      ${track?.hasArtwork ? `<img class="album-art" src="${escapeAttribute(api.artworkUrl(track.id))}" alt="" />` : ""}
+    <div class="now-playing has-artwork">
+      ${track ? renderCover(track, "album-art") : `<span class="album-art cover-placeholder tone-0">ZU</span>`}
       <div class="now-copy"><strong data-testid="now-title">${escapeHtml(track?.title ?? "Nothing playing")}</strong><span>${escapeHtml(track?.artist ?? "Choose a track from the library")}</span></div>
     </div>
     <div class="transport">
       ${renderSoundVisualizer("host-visualizer")}
       <div class="transport-buttons">
-        <button class="icon" data-action="previous" aria-label="Previous track">⏮</button>
-        <button class="icon" data-action="${playing ? "pause" : "play"}" data-testid="play-pause" aria-label="${playing ? "Pause" : "Play"}">${playing ? "❚❚" : "▶"}</button>
-        <button class="icon" data-action="next" aria-label="Next track">⏭</button>
-        <button class="icon" data-action="stop" aria-label="Stop">■</button>
+        <button class="icon" data-action="previous" aria-label="Previous track">${icon("previous")}</button>
+        <button class="icon player-primary" data-action="${playing ? "pause" : "play"}" data-testid="play-pause" aria-label="${playing ? "Pause" : "Play"}">${icon(playing ? "pause" : "play")}</button>
+        <button class="icon" data-action="next" aria-label="Next track">${icon("next")}</button>
+        <button class="icon" data-action="stop" aria-label="Stop">${icon("stop")}</button>
       </div>
       <div class="progress-row">
         <span class="time" data-current-time>${formatTime(positionMs)}</span>
@@ -616,12 +628,28 @@ function renderPlayer(state: AppSnapshot): string {
       </div>
     </div>
     <div class="output-controls">
-      <button class="shuffle-button${state.player.shuffle ? " active" : ""}" data-action="shuffle" aria-pressed="${state.player.shuffle}" aria-label="Shuffle">⇄</button>
-      <button class="repeat-button${state.player.repeat !== "off" ? " active" : ""}" data-action="repeat" aria-label="Repeat mode: ${state.player.repeat}">${state.player.repeat === "one" ? "↻1" : "↻"}</button>
-      <button class="icon" data-action="mute" aria-label="${state.player.muted ? "Unmute" : "Mute"}">${state.player.muted ? "🔇" : "🔊"}</button>
+      <button class="shuffle-button${state.player.shuffle ? " active" : ""}" data-action="shuffle" aria-pressed="${state.player.shuffle}" aria-label="Shuffle">${icon("shuffle")}</button>
+      <button class="repeat-button${state.player.repeat !== "off" ? " active" : ""}" data-action="repeat" aria-label="Repeat mode: ${state.player.repeat}">${icon("repeat")}${state.player.repeat === "one" ? `<span class="repeat-one">1</span>` : ""}</button>
+      <button class="icon" data-action="mute" aria-label="${state.player.muted ? "Unmute" : "Mute"}">${icon(state.player.muted ? "volumeOff" : "volume")}</button>
       <input data-volume data-testid="volume" type="range" min="0" max="100" value="${state.player.volume}" aria-label="Volume" />
     </div>
   </footer>`;
+}
+
+function renderCover(track: Track, className: string): string {
+  if (track.hasArtwork) {
+    return `<img class="${className} cover-art" src="${escapeAttribute(api.artworkUrl(track.id))}" alt="" loading="lazy" />`;
+  }
+  return `<span class="${className} cover-placeholder tone-${coverTone(`${track.artist}-${track.album}`)}">${escapeHtml(coverInitials(track.album || track.title))}</span>`;
+}
+
+function coverInitials(value: string): string {
+  const words = value.trim().split(/\s+/).filter(Boolean);
+  return (words.length > 1 ? `${words[0]?.[0] ?? ""}${words[1]?.[0] ?? ""}` : words[0]?.slice(0, 2) ?? "ZU").toLocaleUpperCase();
+}
+
+function coverTone(value: string): number {
+  return [...value].reduce((sum, character) => sum + (character.codePointAt(0) ?? 0), 0) % 4;
 }
 
 function filteredTracks(state: AppSnapshot): Track[] {
