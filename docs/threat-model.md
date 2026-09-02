@@ -107,6 +107,10 @@ protocol. Direct Internet exposure of the loopback daemon is out of scope.
   creating a duplicate authority process.
 - Public GitHub Pages deployment over HTTPS with successful verification and
   deployment workflows.
+- The installed Chromium qualification endpoint is disabled by default. The
+  installed/public-path gate temporarily binds it to loopback
+  (`127.0.0.1:9224`) and restarts the host without it during cleanup, so it is
+  never exposed to another machine or left active with the ordinary broadcaster.
 
 ## Not yet qualified
 

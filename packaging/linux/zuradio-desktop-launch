@@ -52,11 +52,18 @@ done
 
 if [ -n "${host_url:-}" ] && [ -n "$browser" ]; then
   mkdir -p "$browser_profile"
+  set --
+  if [ "${ZURADIO_QUALIFICATION_INSPECTOR:-0}" = 1 ]; then
+    set -- \
+      --remote-debugging-address=127.0.0.1 \
+      --remote-debugging-port=9224
+  fi
   exec "$browser" \
     --app="$host_url" \
     --class=zuradio-desktop \
     --name=zuradio-desktop \
     --user-data-dir="$browser_profile" \
+    "$@" \
     --autoplay-policy=no-user-gesture-required \
     --disable-extensions \
     --disable-component-extensions-with-background-pages \

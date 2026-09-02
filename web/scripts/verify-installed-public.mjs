@@ -9,6 +9,7 @@ const expectedTracks = Number(process.env.ZURADIO_EXPECTED_TRACKS ?? "3");
 const maxConnectMs = 15_000;
 const maxCommandMs = 2_000;
 const maxBeaconRecoveryMs = 15_000;
+const maxInitialBroadcastMs = 45_000;
 
 if (!passwordPath) throw new Error("ZURADIO_TEST_PASSWORD_FILE must name the installed password file");
 const password = fs.readFileSync(passwordPath, "utf8").replace(/[\r\n]+$/, "");
@@ -19,6 +20,11 @@ const host = hostBrowser
   .flatMap((context) => context.pages())
   .find((page) => page.url().startsWith("http://127.0.0.1:"));
 if (!host) throw new Error("The inspected Zuradio desktop page is unavailable");
+const broadcastNavigation = host.getByRole("button", { name: "Broadcast On", exact: true });
+await broadcastNavigation.waitFor({ timeout: maxInitialBroadcastMs });
+await host.locator('.shell[aria-busy="false"]').waitFor({ timeout: maxInitialBroadcastMs });
+await broadcastNavigation.click();
+await host.getByTestId("restart-broadcast").waitFor({ timeout: maxInitialBroadcastMs });
 
 const hostState = await host.evaluate(async () => ({
   hasWebRtc: typeof RTCPeerConnection === "function",
@@ -73,6 +79,7 @@ const browser = await chromium.launch({
   args: ["--autoplay-policy=no-user-gesture-required"],
 });
 const errors = [];
+let playbackRestored = false;
 
 try {
   const listenerContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
@@ -186,6 +193,8 @@ try {
   );
   await trustedController.getByRole("button", { name: "Disconnect", exact: true }).click();
 
+  await restorePlayback(host, hostState.snapshot.player);
+  playbackRestored = true;
   if (errors.length > 0) throw new Error(`Browser errors: ${errors.join(" | ")}`);
   process.stdout.write(`${JSON.stringify({
     result: "passed",
@@ -201,8 +210,40 @@ try {
     streamTrackReceived: true,
   }, null, 2)}\n`);
 } finally {
+  if (!playbackRestored) await restorePlayback(host, hostState.snapshot.player).catch(() => undefined);
   await browser.close();
   await hostBrowser.close();
+}
+
+async function restorePlayback(host, player) {
+  if (player.currentTrackId) {
+    await localAction(host, { kind: "play_track", trackId: player.currentTrackId });
+    await localAction(host, {
+      kind: "seek",
+      positionMs: player.positionMs,
+      trackId: player.currentTrackId,
+    });
+  }
+  if (player.status === "playing") await localAction(host, { kind: "play" });
+  else if (player.status === "paused") await localAction(host, { kind: "pause" });
+  else await localAction(host, { kind: "stop" });
+}
+
+async function localAction(host, action) {
+  await host.evaluate(async (nextAction) => {
+    const response = await fetch("/api/v1/action", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        protocol: 1,
+        commandId: crypto.randomUUID(),
+        expectedRevision: null,
+        actor: { role: "local", peerId: null },
+        action: nextAction,
+      }),
+    });
+    if (!response.ok) throw new Error(`Could not restore installed playback (${response.status})`);
+  }, action);
 }
 
 function watch(page, label, errors) {

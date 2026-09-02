@@ -168,6 +168,10 @@ Pages companion, not a local companion build. Listener password-to-live was
 play/pause command took 165 ms. The listener received one live audio track, the
 controller selected `Arpent` on the installed app, and the gate enforces ceilings
 of 15 seconds for connection and 2 seconds for command acknowledgement.
+`scripts/verify-installed-public.sh` temporarily enables Chromium inspection on
+`127.0.0.1:9224`, runs the installed/public-path gate, then restarts the host
+without the inspection endpoint. The qualification surface is never enabled by
+default and is never bound to a LAN or public interface.
 
 The final installed-byte rerun used the installed optimized daemon and web
 assets with a disposable database and the same static companion bundle that is
