@@ -1,0 +1,4 @@
+interface:
+  display_name: "Zuradio Builder"
+  short_description: "Build and verify Zuradio safely"
+  default_prompt: "Use $zuradio-builder to build, secure, test, or ship Zuradio and its static Web Companion."
