@@ -17,6 +17,17 @@ const HOST = "wss://wss.vdo.ninja";
 const SALT = "vdo.ninja";
 const MAX_MESSAGE_BYTES = 16_384;
 const UPLOAD_CHUNK_BYTES = 8 * 1024;
+const MAX_BINARY_UPLOAD_CHUNK_BYTES = 64 * 1024;
+const BINARY_UPLOAD_FRAME_RESERVE_BYTES = 4 * 1024;
+const BINARY_UPLOAD_FRAME_MAGIC = "ZRU1";
+const BINARY_UPLOAD_PROTOCOL = "zuradio.upload.chunk.v1";
+const BINARY_UPLOAD_REPLY_PROTOCOL = "zuradio.upload.reply.v1";
+const BINARY_UPLOAD_CHANNEL = "zuradio-upload-v1";
+const BINARY_UPLOAD_CHANNEL_LABEL = `x-${BINARY_UPLOAD_CHANNEL}`;
+const BINARY_UPLOAD_TRANSPORT = "binary-v1";
+const BINARY_UPLOAD_BUFFER_HIGH_BYTES = 1024 * 1024;
+const BINARY_UPLOAD_BUFFER_LOW_BYTES = 512 * 1024;
+const UPLOAD_CHUNK_WINDOW = 8;
 const MAX_UPLOAD_FILES = 512;
 const MAX_UPLOAD_FILE_BYTES = 512 * 1024 * 1024;
 const MAX_RENDEZVOUS_PEERS = 16;
@@ -34,6 +45,7 @@ export interface HostBridgeCallbacks {
   action(payload: unknown): Promise<unknown>;
   upload(payload: unknown): Promise<unknown>;
   onSessionReplaced(): void;
+  onTransportFailed(): void;
   onError(message: string): void;
 }
 
@@ -49,6 +61,16 @@ interface PendingRequest {
   resolve(value: unknown): void;
   reject(error: Error): void;
   timer: ReturnType<typeof setTimeout>;
+}
+
+interface BinaryUploadMetadata {
+  type: typeof BINARY_UPLOAD_PROTOCOL;
+  grantId: string;
+  peerId: string;
+  sequence: number;
+  transferId: string;
+  fileId: string;
+  offset: number;
 }
 
 interface ReadyWaiter {
@@ -102,6 +124,7 @@ export class HostBroadcastBridge {
   private session: BroadcastSession | null = null;
   private grants = new Map<string, HostGrant>();
   private latestGrantByTransport = new Map<string, string>();
+  private controlQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly callbacks: HostBridgeCallbacks) {}
 
@@ -136,7 +159,26 @@ export class HostBroadcastBridge {
       control.addEventListener(
         "dataReceived",
         ((event: VDONinjaEvent<"dataReceived">) => {
-          void this.handleControl(event.detail.uuid, event.detail.data);
+          const uuid = event.detail.uuid;
+          const data = event.detail.data;
+          this.controlQueue = this.controlQueue.then(() => this.handleControl(uuid, data));
+        }) as EventListener,
+      );
+      control.addEventListener(
+        "channelOpen",
+        ((event: VDONinjaEvent<"channelOpen">) => {
+          if (event.detail.label !== BINARY_UPLOAD_CHANNEL_LABEL) return;
+          const uuid = event.detail.uuid;
+          const channel = event.detail.channel;
+          channel.binaryType = "arraybuffer";
+          channel.onmessage = (message) => {
+            if (!(message.data instanceof ArrayBuffer)) {
+              sendBinaryUploadReply(channel, null, null, "Invalid binary upload payload");
+              return;
+            }
+            const bytes = new Uint8Array(message.data);
+            this.controlQueue = this.controlQueue.then(() => this.handleBinaryUpload(uuid, bytes, channel));
+          };
         }) as EventListener,
       );
       await Promise.all([listen.connect(), rendezvous.connect(), control.connect()]);
@@ -184,7 +226,7 @@ export class HostBroadcastBridge {
       if (grant.mode === "control") {
         this.control?.sendData(
           { type: "zuradio.snapshot", snapshot },
-          { uuid: grant.transportUuid, allowFallback: false },
+          { uuid: grant.transportUuid, preference: "all", allowFallback: false },
         );
       }
     }
@@ -194,6 +236,8 @@ export class HostBroadcastBridge {
     this.session = null;
     this.grants.clear();
     this.latestGrantByTransport.clear();
+    await this.controlQueue.catch(() => undefined);
+    this.controlQueue = Promise.resolve();
     const listen = this.listen;
     const rendezvous = this.rendezvous;
     const control = this.control;
@@ -294,6 +338,7 @@ export class HostBroadcastBridge {
             expiresInSeconds: response.expiresInSeconds,
             scopes: response.scopes,
             trustedDevice: response.trustedDevice ?? null,
+            uploadTransport: mode === "upload" ? BINARY_UPLOAD_TRANSPORT : null,
             audio:
               mode === "upload"
                 ? null
@@ -305,7 +350,7 @@ export class HostBroadcastBridge {
             snapshot: mode === "control" ? this.callbacks.snapshot() : null,
             state: mode === "listen" ? nowPlaying(this.callbacks.snapshot()) : null,
           },
-          { uuid, allowFallback: false },
+          { uuid, preference: "all", allowFallback: false },
         );
         return;
       }
@@ -340,7 +385,7 @@ export class HostBroadcastBridge {
         const snapshot = this.callbacks.snapshot();
         this.control?.sendData(
           { type: "zuradio.applied", sequence, revision: snapshot.revision },
-          { uuid, allowFallback: false },
+          { uuid, preference: "all", allowFallback: false },
         );
         this.publishState(snapshot);
       } else if (message.type === "zuradio.upload") {
@@ -353,7 +398,7 @@ export class HostBroadcastBridge {
         });
         this.control?.sendData(
           { type: "zuradio.uploaded", sequence, response },
-          { uuid, allowFallback: false },
+          { uuid, preference: "all", allowFallback: false },
         );
         const snapshot = (response as RemoteUploadResponse).snapshot;
         if (snapshot) this.publishState(snapshot);
@@ -362,14 +407,52 @@ export class HostBroadcastBridge {
       const reason = error instanceof Error ? error.message : "Remote request failed";
       this.control?.sendData(
         { type: "zuradio.rejected", message: reason, sequence: message.sequence ?? null },
-        { uuid, allowFallback: false },
+        { uuid, preference: "all", allowFallback: false },
       );
+    }
+  }
+
+  private async handleBinaryUpload(uuid: string, raw: Uint8Array, channel: RTCDataChannel): Promise<void> {
+    let sequence: number | null = null;
+    try {
+      const frame = decodeBinaryUploadFrame(raw);
+      sequence = frame.metadata.sequence;
+      if (!this.session) throw new Error("Zuradio broadcast is not active");
+      const grant = this.grants.get(frame.metadata.grantId);
+      if (
+        !grant ||
+        grant.transportUuid !== uuid ||
+        grant.peerId !== frame.metadata.peerId ||
+        grant.mode !== "upload" ||
+        grant.expiresAt <= Date.now()
+      ) {
+        throw new Error("This browser is not authenticated for binary upload");
+      }
+      const response = await this.callbacks.upload({
+        grantId: grant.grantId,
+        peerId: grant.peerId,
+        sequence,
+        operation: {
+          kind: "chunk",
+          transferId: frame.metadata.transferId,
+          fileId: frame.metadata.fileId,
+          offset: frame.metadata.offset,
+          data: encodeBase64(frame.payload),
+        },
+      });
+      sendBinaryUploadReply(channel, sequence, response, null);
+    } catch (error) {
+      const reason = error instanceof Error ? error.message : "Binary upload request failed";
+      sendBinaryUploadReply(channel, sequence, null, reason);
     }
   }
 
   private attachErrors(sdk: VDONinja): void {
     sdk.addEventListener("error", ((event: CustomEvent<{ error?: Error }>) => {
       this.callbacks.onError(event.detail.error?.message ?? "VDO.Ninja connection failed");
+    }) as EventListener);
+    sdk.addEventListener("reconnectFailed", (() => {
+      this.callbacks.onTransportFailed();
     }) as EventListener);
   }
 
@@ -399,6 +482,8 @@ export class CompanionBridge {
   private invitation: CompanionInvitation | null = null;
   private peerId = crypto.randomUUID();
   private sequence = 1;
+  private uploadTransport: "binary-v1" | "json-v1" = "json-v1";
+  private uploadChannel: RTCDataChannel | null = null;
   private revision = 0;
   private ready = false;
   private helloSent = false;
@@ -653,30 +738,53 @@ export class CompanionBridge {
       transferId,
       files: entries.map(({ file, fileId, relativePath }) => ({ fileId, relativePath, size: file.size })),
     });
+    if (this.uploadTransport === "binary-v1") await this.ensureUploadChannel();
+    onProgress({
+      fileName: entries[0]?.relativePath ?? "Selected music",
+      fileIndex: 0,
+      fileCount: entries.length,
+      fileReceived: 0,
+      fileSize: entries[0]?.file.size ?? 1,
+      cataloguedCount,
+    });
     try {
       for (let fileIndex = 0; fileIndex < entries.length; fileIndex += 1) {
         const entry = entries[fileIndex];
         if (!entry) continue;
-        const bytes = new Uint8Array(await entry.file.arrayBuffer());
-        const digest = encodeHex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
-        for (let offset = 0; offset < bytes.length; offset += UPLOAD_CHUNK_BYTES) {
-          const chunk = bytes.subarray(offset, Math.min(bytes.length, offset + UPLOAD_CHUNK_BYTES));
-          await this.sendUpload({
-            kind: "chunk",
-            transferId,
-            fileId: entry.fileId,
-            offset,
-            data: encodeBase64(chunk),
-          });
-          onProgress({
-            fileName: entry.relativePath,
-            fileIndex,
-            fileCount: entries.length,
-            fileReceived: offset + chunk.length,
-            fileSize: bytes.length,
-            cataloguedCount,
-          });
+        const digestPromise = entry.file
+          .arrayBuffer()
+          .then((bytes) => crypto.subtle.digest("SHA-256", bytes))
+          .then((digest) => encodeHex(new Uint8Array(digest)));
+        const chunkBytes = this.uploadChunkBytes();
+        const pendingChunks: Promise<void>[] = [];
+        try {
+          for (let offset = 0; offset < entry.file.size; offset += chunkBytes) {
+            const chunk = new Uint8Array(
+              await entry.file.slice(offset, Math.min(entry.file.size, offset + chunkBytes)).arrayBuffer(),
+            );
+            const received = offset + chunk.length;
+            pendingChunks.push(
+              this.sendUploadChunk(transferId, entry.fileId, offset, chunk, entry.relativePath).then(() => {
+                onProgress({
+                  fileName: entry.relativePath,
+                  fileIndex,
+                  fileCount: entries.length,
+                  fileReceived: received,
+                  fileSize: entry.file.size,
+                  cataloguedCount,
+                });
+              }),
+            );
+            if (pendingChunks.length >= UPLOAD_CHUNK_WINDOW) {
+              await pendingChunks.shift();
+            }
+          }
+          await Promise.all(pendingChunks);
+        } catch (error) {
+          await Promise.allSettled(pendingChunks);
+          throw error;
         }
+        const digest = await digestPromise;
         const finished = await this.sendUpload({
           kind: "finish_file",
           transferId,
@@ -688,15 +796,15 @@ export class CompanionBridge {
           fileName: entry.relativePath,
           fileIndex,
           fileCount: entries.length,
-          fileReceived: bytes.length,
-          fileSize: bytes.length,
+          fileReceived: entry.file.size,
+          fileSize: entry.file.size,
           cataloguedCount,
         });
       }
       const committed = await this.sendUpload({ kind: "commit", transferId });
       return committed.outcome;
     } catch (error) {
-      await this.sendUpload({ kind: "abort", transferId }).catch(() => undefined);
+      await this.sendUpload({ kind: "abort", transferId }, 2_000).catch(() => undefined);
       throw error;
     }
   }
@@ -712,6 +820,8 @@ export class CompanionBridge {
     this.helloSent = false;
     this.helloSending = false;
     this.sequence = 1;
+    this.uploadTransport = "json-v1";
+    this.uploadChannel = null;
     this.pendingServerProof = null;
     this.pendingHello = null;
     this.discoveryNonce = null;
@@ -877,6 +987,7 @@ export class CompanionBridge {
       this.pendingServerProof = null;
       this.pendingHello = null;
       this.grantId = stringField(message, "grantId", 256);
+      this.uploadTransport = message.uploadTransport === BINARY_UPLOAD_TRANSPORT ? "binary-v1" : "json-v1";
       if (
         this.connectionAuth?.kind === "password" &&
         this.connectionRoute &&
@@ -1028,12 +1139,111 @@ export class CompanionBridge {
     this.analysisSource = source;
   }
 
-  private async sendUpload(operation: UploadOperation): Promise<RemoteUploadResponse> {
+  private async sendUpload(operation: UploadOperation, timeout = 45_000): Promise<RemoteUploadResponse> {
     if (!this.isUploader) throw new Error("Upload mode is not authenticated");
-    return (await this.sendRequest("zuradio.upload", { operation }, 45_000)) as RemoteUploadResponse;
+    return (await this.sendRequest(
+      "zuradio.upload",
+      { operation },
+      timeout,
+      uploadOperationDescription(operation),
+    )) as RemoteUploadResponse;
   }
 
-  private sendRequest(type: string, payload: Record<string, unknown>, timeout = 10_000): Promise<unknown> {
+  private async sendUploadChunk(
+    transferId: string,
+    fileId: string,
+    offset: number,
+    bytes: Uint8Array,
+    fileName: string,
+  ): Promise<RemoteUploadResponse> {
+    if (this.uploadTransport !== "binary-v1") {
+      return this.sendUpload({ kind: "chunk", transferId, fileId, offset, data: encodeBase64(bytes) });
+    }
+    if (!this.control || !this.controlPeerUuid || !this.grantId || !this.ready) {
+      throw new Error("Remote data channel is not ready");
+    }
+    const channel = this.uploadChannel ?? await this.ensureUploadChannel();
+    if (channel.bufferedAmount > BINARY_UPLOAD_BUFFER_HIGH_BYTES) await waitForDataChannelCapacity(channel);
+    const sequence = this.sequence;
+    const frame = encodeBinaryUploadFrame(
+      {
+        type: BINARY_UPLOAD_PROTOCOL,
+        grantId: this.grantId,
+        peerId: this.peerId,
+        sequence,
+        transferId,
+        fileId,
+        offset,
+      },
+      bytes,
+      this.control.getMaxMessageSize(this.controlPeerUuid) ?? 65_536,
+    );
+    const pending = this.registerRequest(sequence, 45_000, `upload chunk at byte ${offset} for ${fileName}`);
+    this.sequence += 1;
+    try {
+      if (channel.readyState !== "open") throw new Error("Remote binary upload channel is not ready");
+      channel.send(frame);
+    } catch (error) {
+      this.rejectRequest(sequence, error instanceof Error ? error : new Error(String(error)));
+    }
+    return (await pending) as RemoteUploadResponse;
+  }
+
+  private async ensureUploadChannel(): Promise<RTCDataChannel> {
+    if (this.uploadChannel?.readyState === "open") return this.uploadChannel;
+    if (!this.control || !this.controlPeerUuid) throw new Error("Remote binary upload channel is not ready");
+    const channel = await this.control.openChannel(this.controlPeerUuid, BINARY_UPLOAD_CHANNEL, {
+      ordered: true,
+      timeout: 15_000,
+    });
+    channel.binaryType = "arraybuffer";
+    channel.bufferedAmountLowThreshold = BINARY_UPLOAD_BUFFER_LOW_BYTES;
+    channel.onmessage = (message) => this.handleBinaryUploadReply(message.data);
+    this.uploadChannel = channel;
+    return channel;
+  }
+
+  private handleBinaryUploadReply(raw: unknown): void {
+    if (typeof raw !== "string" || new TextEncoder().encode(raw).length > MAX_MESSAGE_BYTES) {
+      this.callbacks.onError("The laptop sent an invalid binary upload acknowledgement");
+      return;
+    }
+    let value: unknown;
+    try {
+      value = JSON.parse(raw);
+    } catch {
+      this.callbacks.onError("The laptop sent an invalid binary upload acknowledgement");
+      return;
+    }
+    if (!value || typeof value !== "object" || Array.isArray(value)) return;
+    const reply = value as Record<string, unknown>;
+    if (
+      reply.type !== BINARY_UPLOAD_REPLY_PROTOCOL ||
+      typeof reply.sequence !== "number" ||
+      !Number.isSafeInteger(reply.sequence)
+    ) return;
+    if (typeof reply.message === "string") {
+      this.rejectRequest(reply.sequence, new Error(reply.message));
+    } else if (isUploadResponse(reply.response)) {
+      this.resolveRequest(reply.sequence, reply.response);
+    }
+  }
+
+  private uploadChunkBytes(): number {
+    if (this.uploadTransport !== "binary-v1" || !this.control || !this.controlPeerUuid) return UPLOAD_CHUNK_BYTES;
+    const maximum = this.control.getMaxMessageSize(this.controlPeerUuid) ?? 65_536;
+    if (maximum <= BINARY_UPLOAD_FRAME_RESERVE_BYTES + 1_024) {
+      throw new Error("The direct connection cannot carry a safe upload frame");
+    }
+    return Math.min(MAX_BINARY_UPLOAD_CHUNK_BYTES, maximum - BINARY_UPLOAD_FRAME_RESERVE_BYTES);
+  }
+
+  private sendRequest(
+    type: string,
+    payload: Record<string, unknown>,
+    timeout = 10_000,
+    description = "remote request",
+  ): Promise<unknown> {
     if (!this.control || !this.controlPeerUuid || !this.grantId || !this.ready) {
       return Promise.reject(new Error("Remote data channel is not ready"));
     }
@@ -1041,24 +1251,35 @@ export class CompanionBridge {
     const controlPeerUuid = this.controlPeerUuid;
     const grantId = this.grantId;
     const sequence = this.sequence;
+    const pending = this.registerRequest(sequence, timeout, description);
+    const sent = control.sendData(
+      { type, grantId, peerId: this.peerId, sequence, ...payload },
+      { uuid: controlPeerUuid, allowFallback: false },
+    );
+    if (!sent) {
+      this.rejectRequest(sequence, new Error("Remote data channel is not ready"));
+      return pending;
+    }
+    this.sequence += 1;
+    return pending;
+  }
+
+  private registerRequest(sequence: number, timeout: number, description: string): Promise<unknown> {
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pendingRequests.delete(sequence);
-        reject(new Error("The laptop did not acknowledge the request"));
+        reject(new Error(`The laptop did not acknowledge ${description}`));
       }, timeout);
       this.pendingRequests.set(sequence, { resolve, reject, timer });
-      const sent = control.sendData(
-        { type, grantId, peerId: this.peerId, sequence, ...payload },
-        { uuid: controlPeerUuid, allowFallback: false },
-      );
-      if (!sent) {
-        clearTimeout(timer);
-        this.pendingRequests.delete(sequence);
-        reject(new Error("Remote data channel is not ready"));
-        return;
-      }
-      this.sequence += 1;
     });
+  }
+
+  private rejectRequest(sequence: number, error: Error): void {
+    const pending = this.pendingRequests.get(sequence);
+    if (!pending) return;
+    clearTimeout(pending.timer);
+    this.pendingRequests.delete(sequence);
+    pending.reject(error);
   }
 
   private resolveRequest(sequence: unknown, value: unknown, revision?: unknown): void {
@@ -1096,6 +1317,131 @@ function createSdk(password: string, label: string): VDONinja {
     autoRecover: true,
     autoRelay: true,
   });
+}
+
+function sendBinaryUploadReply(
+  channel: RTCDataChannel,
+  sequence: number | null,
+  response: unknown,
+  message: string | null,
+): void {
+  if (channel.readyState !== "open") return;
+  channel.send(JSON.stringify({
+    type: BINARY_UPLOAD_REPLY_PROTOCOL,
+    sequence,
+    ...(response ? { response } : {}),
+    ...(message ? { message } : {}),
+  }));
+}
+
+async function waitForDataChannelCapacity(channel: RTCDataChannel): Promise<void> {
+  channel.bufferedAmountLowThreshold = BINARY_UPLOAD_BUFFER_LOW_BYTES;
+  if (channel.bufferedAmount <= BINARY_UPLOAD_BUFFER_HIGH_BYTES) return;
+  await new Promise<void>((resolve, reject) => {
+    const timer = window.setTimeout(() => finish(new Error("Binary upload channel backpressure did not clear")), 15_000);
+    const onLow = () => finish();
+    const onClose = () => finish(new Error("Binary upload channel closed while waiting for backpressure"));
+    const finish = (error?: Error) => {
+      window.clearTimeout(timer);
+      channel.removeEventListener("bufferedamountlow", onLow);
+      channel.removeEventListener("close", onClose);
+      channel.removeEventListener("error", onClose);
+      if (error) reject(error);
+      else resolve();
+    };
+    channel.addEventListener("bufferedamountlow", onLow, { once: true });
+    channel.addEventListener("close", onClose, { once: true });
+    channel.addEventListener("error", onClose, { once: true });
+    if (channel.bufferedAmount <= BINARY_UPLOAD_BUFFER_LOW_BYTES) finish();
+  });
+}
+
+function encodeBinaryUploadFrame(
+  metadata: BinaryUploadMetadata,
+  payload: Uint8Array,
+  maximumMessageBytes: number,
+): Uint8Array<ArrayBuffer> {
+  if (payload.length < 1 || payload.length > MAX_BINARY_UPLOAD_CHUNK_BYTES) {
+    throw new Error("Binary upload chunk is outside the supported size");
+  }
+  const metadataBytes = new TextEncoder().encode(JSON.stringify(metadata));
+  if (metadataBytes.length > BINARY_UPLOAD_FRAME_RESERVE_BYTES - 8) {
+    throw new Error("Binary upload metadata is too large");
+  }
+  const frame = new Uint8Array(8 + metadataBytes.length + payload.length);
+  frame.set(new TextEncoder().encode(BINARY_UPLOAD_FRAME_MAGIC), 0);
+  new DataView(frame.buffer).setUint32(4, metadataBytes.length);
+  frame.set(metadataBytes, 8);
+  frame.set(payload, 8 + metadataBytes.length);
+  if (frame.length > maximumMessageBytes) {
+    throw new Error(`Binary upload frame exceeds the negotiated ${maximumMessageBytes}-byte limit`);
+  }
+  return frame;
+}
+
+function decodeBinaryUploadFrame(raw: Uint8Array): { metadata: BinaryUploadMetadata; payload: Uint8Array } {
+  if (raw.length < 9 || raw.length > MAX_BINARY_UPLOAD_CHUNK_BYTES + BINARY_UPLOAD_FRAME_RESERVE_BYTES) {
+    throw new Error("Invalid binary upload frame size");
+  }
+  const magic = new TextDecoder().decode(raw.subarray(0, 4));
+  if (magic !== BINARY_UPLOAD_FRAME_MAGIC) throw new Error("Invalid binary upload frame protocol");
+  const metadataLength = new DataView(raw.buffer, raw.byteOffset, raw.byteLength).getUint32(4);
+  if (metadataLength < 2 || metadataLength > BINARY_UPLOAD_FRAME_RESERVE_BYTES - 8) {
+    throw new Error("Invalid binary upload metadata size");
+  }
+  const payloadOffset = 8 + metadataLength;
+  if (payloadOffset >= raw.length || raw.length - payloadOffset > MAX_BINARY_UPLOAD_CHUNK_BYTES) {
+    throw new Error("Invalid binary upload payload size");
+  }
+  let value: unknown;
+  try {
+    value = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(raw.subarray(8, payloadOffset)));
+  } catch {
+    throw new Error("Invalid binary upload metadata");
+  }
+  if (!value || typeof value !== "object" || Array.isArray(value)) {
+    throw new Error("Invalid binary upload metadata");
+  }
+  const metadata = value as Record<string, unknown>;
+  if (
+    metadata.type !== BINARY_UPLOAD_PROTOCOL ||
+    !validBoundedString(metadata.grantId, 256) ||
+    !validBoundedString(metadata.peerId, 128) ||
+    !validBoundedString(metadata.transferId, 80) ||
+    !validBoundedString(metadata.fileId, 80) ||
+    typeof metadata.sequence !== "number" ||
+    !Number.isSafeInteger(metadata.sequence) ||
+    metadata.sequence < 1 ||
+    typeof metadata.offset !== "number" ||
+    !Number.isSafeInteger(metadata.offset) ||
+    metadata.offset < 0 ||
+    metadata.offset > MAX_UPLOAD_FILE_BYTES
+  ) {
+    throw new Error("Invalid binary upload metadata fields");
+  }
+  return {
+    metadata: metadata as unknown as BinaryUploadMetadata,
+    payload: raw.slice(payloadOffset),
+  };
+}
+
+function validBoundedString(value: unknown, maximum: number): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= maximum;
+}
+
+function uploadOperationDescription(operation: UploadOperation): string {
+  switch (operation.kind) {
+    case "begin":
+      return "upload initialization";
+    case "chunk":
+      return `upload chunk at byte ${operation.offset}`;
+    case "finish_file":
+      return "checksum and library import";
+    case "commit":
+      return "upload completion";
+    case "abort":
+      return "upload cancellation";
+  }
 }
 
 function parseMessage(raw: unknown): MessageRecord | null {

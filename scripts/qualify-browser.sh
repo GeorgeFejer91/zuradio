@@ -7,16 +7,9 @@ web_root=${ZURADIO_WEB_ROOT:-$project_dir/web/dist}
 music_dir=${ZURADIO_TEST_MUSIC:-$project_dir/tests/fixtures/open-music}
 companion_base=${ZURADIO_COMPANION_BASE:-http://127.0.0.1:4173}
 password_source=${ZURADIO_TEST_PASSWORD_FILE:-}
+recognizer_command=${ZURADIO_RECOGNIZER_COMMAND:-$project_dir/tests/fixtures/songrec-stub.sh}
 
-if [ -z "$password_source" ]; then
-  for candidate in "$HOME/Desktop/zuradio.txt" "$HOME/Schreibtisch/zuradio.txt"; do
-    if [ -f "$candidate" ]; then
-      password_source=$candidate
-      break
-    fi
-  done
-fi
-if [ ! -f "$password_source" ]; then
+if [ -n "$password_source" ] && [ ! -f "$password_source" ]; then
   printf 'Set ZURADIO_TEST_PASSWORD_FILE to a password file containing 8 to 256 bytes.\n' >&2
   exit 2
 fi
@@ -35,7 +28,12 @@ library_dir="$qualification_dir/library"
 format_dir="$qualification_dir/formats"
 selection_dir="$music_dir"
 password_file="$qualification_dir/password.txt"
-install -m 0600 "$password_source" "$password_file"
+if [ -n "$password_source" ]; then
+  install -m 0600 "$password_source" "$password_file"
+else
+  umask 077
+  printf 'zuradio-isolated-browser-gate-%s-%s\n' "$$" "$(date +%s)" > "$password_file"
+fi
 mkdir -p "$format_dir"
 format_fixtures=0
 if command -v sox >/dev/null 2>&1 && command -v flac >/dev/null 2>&1; then
@@ -67,7 +65,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-"$binary" --data-dir "$data_dir" serve \
+ZURADIO_RECOGNIZER_COMMAND="$recognizer_command" "$binary" --data-dir "$data_dir" serve \
   --music "$music_dir" \
   --music "$format_dir" \
   --library "$library_dir" \

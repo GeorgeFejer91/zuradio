@@ -5,9 +5,10 @@ Status: implementation baseline, 2026-09-01.
 ## Invariant
 
 The collection never leaves the laptop as hosted files. GitHub Pages serves the
-static Zuradio Web Companion only. During a locally started broadcast, the
-laptop emits a live WebRTC audio track. Stopping the laptop, daemon, host bridge,
-or broadcast makes remote audio unavailable.
+static Zuradio Web Companion only. Whenever the installed app is running, its
+password-protected WebRTC discovery beacon is active; that availability does
+not start playback. While a song plays, the laptop emits the live audio track.
+Stopping the laptop, daemon, or supervised host makes remote access unavailable.
 
 ```mermaid
 flowchart LR
@@ -15,7 +16,7 @@ flowchart LR
   Core --> Audio["Authenticated Range endpoint\nWeb Audio host player"]
   CLI["zuradio CLI"] --> Core
   Desktop["Chromium app shell / Tauri fallback / Linux service"] --> Core
-  Core <--> Host["Loopback host bridge\ndefault-on broadcast"]
+  Core <--> Host["Loopback host bridge\nalways-ready beacon"]
   Host -->|"live audio only"| VDO["VDO.Ninja WebRTC transport"]
   Host <--> |"typed commands · state · uploads"| VDO
   Pages["GitHub Pages\nstatic companion assets only"] --> Companion["Zuradio Web Companion"]
@@ -45,7 +46,13 @@ system WebKitGTK shell. WebRTC is a compile-time WebKitGTK feature and is absent
 from some distribution builds even when the runtime setting exists. The
 Chromium window uses a private Zuradio profile, enables unattended local audio,
 and receives the same protected loopback bootstrap URL. Rust remains the sole
-authority; Chromium is only the audio/UI/WebRTC adapter.
+authority; Chromium is only the audio/UI/WebRTC adapter. A systemd user service
+starts that adapter with the user's desktop session and restarts it if the
+process or only app window exits. The host also restores a missing authority
+session immediately and rotates it after the VDO.Ninja SDK exhausts transport
+recovery. Restarting the Rust authority replaces the supervised host, rotates
+broadcast authority, and invalidates stale remote grants. Beacon activation
+does not dispatch any player command.
 
 ## One authority, many adapters
 
@@ -76,10 +83,22 @@ playlist and history references are not erased when a mount moves or a managed
 file is migrated.
 
 Remote uploads are transactional per file: the Rust daemon validates a declared
-selection, accepts ordered 8 KiB chunks into a private staging directory, and
-verifies each SHA-256 digest. Each verified file is parsed, moved into the
+selection, accepts raw frames of up to 64 KiB on a dedicated ordered WebRTC
+binary channel with negotiated-size checks and sender backpressure, and verifies
+each SHA-256 digest. Small commands and acknowledgements stay on the control
+channel; an 8 KiB JSON/base64 path remains only for rolling-version compatibility.
+Each verified file is parsed, moved into the
 user-visible Music/Zuradio Library hierarchy, inserted into the catalog, and
-published to open clients before the next file finishes. A disconnect discards
+published to open clients before the next file finishes. Only after that
+publication, a bounded two-worker queue invokes the official Rust SongRec helper
+with a 30-second deadline. The Linux installer fetches a pinned official package,
+verifies its SHA-256 digest, and installs the helper as a separately licensed
+process rather than linking GPL code into the MIT daemon. Its Shazam-derived
+title, artist, album, genre, display label, and provider ID occupy separate
+catalog columns. Local and remote search include those fields, but they never
+overwrite embedded, folder-derived, or user-corrected metadata and never affect
+managed-library placement. Provider absence, no-match, and operational failure
+are durable visible states; a manual scan retries the retryable states. A disconnect discards
 only incomplete staging data; completed originals remain available. Embedded
 tags outrank folder/filename inference; persistent user overrides outrank both.
 The broadcasting host renders acknowledged operations as a local transfer strip
@@ -108,7 +127,7 @@ adapter can replace it without changing domain commands or remote authorization.
 
 ## Password proof and modes
 
-Starting a broadcast creates:
+Starting the installed host, or securely rotating its always-ready beacon, creates:
 
 1. a deterministic password-derived, data-only rendezvous route;
 2. an unrelated high-entropy private control/data route; and
@@ -141,7 +160,8 @@ Discovery teardown, password-key derivation, and private control transport are
 overlapped where their dependencies allow. Controller commands become
 available as soon as mutual proof and the initial snapshot complete; the
 secondary audio receiver connects without delaying the control surface. Direct
-ordered WebRTC data channels carry commands without polling or proxy hops.
+ordered WebRTC data channels carry commands and a separate backpressured binary
+lane carries file bytes without polling or proxy hops.
 
 ## Offline behavior
 

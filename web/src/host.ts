@@ -38,6 +38,7 @@ let taskTail: Promise<void> = Promise.resolve();
 let checkingBroadcastOwnership = false;
 let automaticBroadcastRetryTimer = 0;
 let automaticBroadcastRetryCount = 0;
+let recoveringBroadcastTransport = false;
 let transferActivity: TransferActivity | null = null;
 let transferClearTimer = 0;
 const BROADCAST_START_ATTEMPTS = 5;
@@ -76,6 +77,7 @@ const bridge = new HostBroadcastBridge({
   },
   upload: async (payload) => {
     const operation = uploadOperation(payload);
+    const sequence = uploadSequence(payload);
     prepareTransferActivity(operation);
     try {
       const result = await api.remoteUpload(payload);
@@ -85,14 +87,15 @@ const bridge = new HostBroadcastBridge({
       else refreshTransferActivity();
       return result;
     } catch (error) {
-      failTransferActivity(operation, messageOf(error));
+      failTransferActivity(operation, messageOf(error), sequence);
       refreshTransferActivity();
       throw error;
     }
   },
   onSessionReplaced: () => {
-    markBroadcastReplaced();
+    void verifyBroadcastOwnership();
   },
+  onTransportFailed: () => recoverBroadcastTransport(),
   onError: (reason) => showMessage(reason, true),
 });
 
@@ -153,7 +156,7 @@ async function verifyBroadcastOwnership(): Promise<void> {
       current.epoch === ownedSession.epoch
     ) return;
     await bridge.stop();
-    if (broadcastSession === ownedSession) markBroadcastReplaced();
+    if (broadcastSession === ownedSession) markBroadcastUnavailable(current);
   } catch {
     // A service restart can make one poll fail; the next successful poll decides ownership.
   } finally {
@@ -161,11 +164,40 @@ async function verifyBroadcastOwnership(): Promise<void> {
   }
 }
 
-function markBroadcastReplaced(): void {
+function markBroadcastUnavailable(replacement: BroadcastSession | null): void {
   broadcastSession = null;
   interruptTransferActivity("Broadcast replaced before the transfer finished");
-  showMessage("A newer Zuradio window replaced this broadcast", true);
+  if (replacement) {
+    showMessage("A newer Zuradio window replaced this remote-access beacon", true);
+  } else if (autoBroadcast) {
+    showMessage("Remote-access beacon interrupted; restoring it automatically…", true);
+    scheduleAutomaticBroadcastRetry(0);
+  } else {
+    showMessage("Broadcast stopped; remote connections are revoked", false);
+  }
   render();
+}
+
+function recoverBroadcastTransport(): void {
+  if (!autoBroadcast || !broadcastSession || recoveringBroadcastTransport) return;
+  recoveringBroadcastTransport = true;
+  void task(async () => {
+    try {
+      broadcastSession = null;
+      interruptTransferActivity("Transfer interrupted while the remote-access beacon recovered");
+      showMessage("Remote-access network interrupted; restoring the beacon…", true);
+      render();
+      await bridge.stop();
+      await activateBroadcast(true);
+      automaticBroadcastRetryCount = 0;
+      showMessage("Remote-access beacon restored", false);
+    } catch (error) {
+      scheduleAutomaticBroadcastRetry();
+      throw error;
+    } finally {
+      recoveringBroadcastTransport = false;
+    }
+  });
 }
 
 async function initialize(): Promise<void> {
@@ -296,6 +328,17 @@ async function handleClick(target: HTMLElement): Promise<void> {
     });
     return;
   }
+  if (action === "restart-broadcast") {
+    cancelAutomaticBroadcastRetry();
+    await task(async () => {
+      await bridge.stop();
+      broadcastSession = null;
+      await activateBroadcast(false);
+      automaticBroadcastRetryCount = 0;
+      showMessage("Secure remote-access beacon restarted", false);
+    });
+    return;
+  }
 
   const trackId = target.dataset.trackId;
   const playlistId = target.dataset.playlistId;
@@ -371,7 +414,6 @@ async function activateBroadcast(automatic: boolean): Promise<void> {
   }
   if (automatic && broadcastSession) {
     await bridge.stop();
-    await api.stopBroadcast();
     broadcastSession = null;
   }
   let lastError: unknown = new Error("Broadcast setup failed");
@@ -407,10 +449,10 @@ function startAutomaticBroadcast(): void {
   });
 }
 
-function scheduleAutomaticBroadcastRetry(): void {
+function scheduleAutomaticBroadcastRetry(delayOverrideMs?: number): void {
   if (!autoBroadcast || automaticBroadcastRetryTimer || broadcastSession) return;
   const index = Math.min(automaticBroadcastRetryCount, AUTOMATIC_BROADCAST_RETRY_DELAYS_MS.length - 1);
-  const delayMs = AUTOMATIC_BROADCAST_RETRY_DELAYS_MS[index] ?? 60_000;
+  const delayMs = delayOverrideMs ?? AUTOMATIC_BROADCAST_RETRY_DELAYS_MS[index] ?? 60_000;
   automaticBroadcastRetryCount += 1;
   automaticBroadcastRetryTimer = window.setTimeout(() => {
     automaticBroadcastRetryTimer = 0;
@@ -541,7 +583,7 @@ function render(): void {
       ${renderSidebar(snapshot)}
       <main class="main${transferActivity ? " has-transfer" : ""}">
         <div class="toolbar">
-          <label class="toolbar-search">${icon("library")}<input class="search" data-search data-testid="search" type="search" value="${escapeAttribute(search)}" placeholder="Search title, artist, or album" aria-label="Search library" /></label>
+          <label class="toolbar-search">${icon("library")}<input class="search" data-search data-testid="search" type="search" value="${escapeAttribute(search)}" placeholder="Search all file and Shazam metadata" aria-label="Search library" /></label>
           <span class="toolbar-spacer"></span>
           <button class="scan-button" data-action="scan" data-testid="scan-library" ${disabled()}>${icon("scan")}<span>Scan library</span></button>
         </div>
@@ -584,7 +626,7 @@ function renderSidebar(state: AppSnapshot): string {
       <div class="sidebar-section-title"><span>Saved playlists</span><span>${state.playlists.length}</span></div>
       ${state.playlists.length ? state.playlists.slice(0, 7).map((playlist) => `<button data-action="open-playlist" data-playlist-id="${escapeAttribute(playlist.id)}" aria-label="Open ${escapeAttribute(playlist.name)}"><span class="playlist-glyph tone-${coverTone(playlist.name)}">${escapeHtml(coverInitials(playlist.name))}</span><span>${escapeHtml(playlist.name)}</span></button>`).join("") : `<p>No playlists yet</p>`}
     </section>
-    <div class="sidebar-status"><span class="broadcast-indicator${broadcastSession ? " active" : ""}"></span><span>${broadcastSession ? "Laptop broadcasting" : "Broadcast offline"}</span></div>
+    <div class="sidebar-status"><span class="broadcast-indicator${broadcastSession ? " active" : ""}"></span><span>${broadcastSession ? "Remote access ready" : autoBroadcast ? "Starting remote access" : "Broadcast offline"}</span></div>
   </aside>`;
 }
 
@@ -621,7 +663,7 @@ function renderTrack(track: Track, state: AppSnapshot): string {
   const playlist = selectedPlaylistId ? state.playlists.find((item) => item.id === selectedPlaylistId) : state.playlists[0];
   return `<li class="track-row" data-track-row="${escapeAttribute(track.id)}">
     <button class="track-cover-button" data-action="play-track" data-track-id="${escapeAttribute(track.id)}" aria-label="Play ${escapeAttribute(track.title)}" title="Play">${renderCover(track, "track-cover")}<span class="track-play-overlay">${icon("play")}</span></button>
-    <div class="track-title"><strong>${escapeHtml(track.title)}</strong><span>${escapeHtml(track.format.toUpperCase())}${track.year ? ` · ${track.year}` : ""}</span></div>
+    <div class="track-title"><strong>${escapeHtml(track.title)}</strong><span>${escapeHtml(track.format.toUpperCase())}${track.year ? ` · ${track.year}` : ""}</span>${renderRecognitionLabel(track)}</div>
     <div class="track-cell track-artist">${escapeHtml(track.artist)}</div>
     <div class="track-cell track-album">${escapeHtml(track.album)}</div>
     <div class="track-duration">${formatTime(track.durationMs)}</div>
@@ -632,6 +674,17 @@ function renderTrack(track: Track, state: AppSnapshot): string {
       <button data-action="edit-track" data-track-id="${escapeAttribute(track.id)}" aria-label="Edit metadata for ${escapeAttribute(track.title)}" title="Edit metadata">${icon("edit")}</button>
     </div>
   </li>`;
+}
+
+function renderRecognitionLabel(track: Track): string {
+  const text = {
+    pending: "Shazam metadata · Identifying…",
+    recognized: `Shazam metadata · ${track.recognition.label ?? "Recognized"}${track.recognition.genre ? ` · ${track.recognition.genre}` : ""}`,
+    no_match: "Shazam metadata · No match",
+    unavailable: "Shazam metadata · Recognition helper unavailable",
+    error: "Shazam metadata · Retry on next scan",
+  }[track.recognition.status];
+  return `<span class="recognition-label status-${track.recognition.status}" data-testid="recognition-${escapeAttribute(track.id)}">${escapeHtml(text)}</span>`;
 }
 
 function renderMetadataEditor(state: AppSnapshot): string {
@@ -722,17 +775,18 @@ function renderHistory(state: AppSnapshot): string {
 function renderBroadcast(): string {
   if (!broadcastSession) {
     return `<section class="broadcast-panel">
-      <h2>Broadcast</h2>
-      <div class="broadcast-status"><strong>Off</strong><p class="muted">No remote peer can hear or control this laptop.</p></div>
-      <p>Starting a broadcast makes this laptop discoverable from the Zuradio Web Companion after a listener enters the shared password. The desktop app starts this automatically on launch. Music always stays on this laptop.</p>
-      <button class="primary" data-action="start-broadcast" data-testid="start-broadcast" ${disabled()}>Start broadcast</button>
+      <h2>Remote access</h2>
+      <div class="broadcast-status"><strong>${autoBroadcast ? "Starting…" : "Off"}</strong><p class="muted">${autoBroadcast ? "Zuradio is restoring its password-protected discovery beacon." : "No remote peer can hear or control this laptop."}</p></div>
+      <p>${autoBroadcast ? "The beacon stays available whenever this app is running. It does not start music; playback remains under the player controls." : "Starting a broadcast makes this laptop discoverable from the Zuradio Web Companion after a listener enters the shared password. Music always stays on this laptop."}</p>
+      ${autoBroadcast ? "" : `<button class="primary" data-action="start-broadcast" data-testid="start-broadcast" ${disabled()}>Start broadcast</button>`}
     </section>`;
   }
   return `<section class="broadcast-panel">
-    <h2>Broadcast</h2>
-    <div class="broadcast-status live"><strong>Live</strong><p class="muted">Password discovery is active. Stopping revokes every connection and partial upload until the next manual start or app launch.</p></div>
+    <h2>Remote access</h2>
+    <div class="broadcast-status live"><strong>Discoverable</strong><p class="muted">The password-protected beacon is active. Music plays only when a player command starts it.</p></div>
     <p class="muted">Laptop player controls take priority whenever a local and external command arrive together.</p>
-    <button class="danger" data-action="stop-broadcast" data-testid="stop-broadcast" ${disabled()}>Stop broadcast</button>
+    <button data-action="restart-broadcast" data-testid="restart-broadcast" ${disabled()}>Restart secure beacon</button>
+    ${autoBroadcast ? "" : `<button class="danger" data-action="stop-broadcast" data-testid="stop-broadcast" ${disabled()}>Stop broadcast</button>`}
     <div class="access-modes" data-testid="access-modes">
       <div><strong>Listen</strong><span>Live audio and current track</span></div>
       <div><strong>Control</strong><span>Player, queue, library and playlists</span></div>
@@ -814,7 +868,21 @@ function filteredTracks(state: AppSnapshot): Track[] {
   const tracks = availableTracks(state);
   if (!query) return tracks;
   return tracks.filter((track) =>
-    [track.title, track.artist, track.album].some((value) => value.toLocaleLowerCase().includes(query)),
+    [
+      track.title,
+      track.artist,
+      track.album,
+      track.albumArtist,
+      track.format,
+      track.year?.toString() ?? "",
+      track.recognition.label ?? "",
+      track.recognition.title ?? "",
+      track.recognition.artist ?? "",
+      track.recognition.album ?? "",
+      track.recognition.genre ?? "",
+    ].some((value) =>
+      value.toLocaleLowerCase().includes(query),
+    ),
   );
 }
 
@@ -839,6 +907,13 @@ interface TransferActivity {
   files: TransferFileActivity[];
   activeFileId: string | null;
   detail: string | null;
+  failureSequence: number | null;
+}
+
+function uploadSequence(payload: unknown): number | null {
+  if (!payload || typeof payload !== "object") return null;
+  const sequence = (payload as { sequence?: unknown }).sequence;
+  return typeof sequence === "number" && Number.isSafeInteger(sequence) && sequence > 0 ? sequence : null;
 }
 
 function uploadOperation(payload: unknown): UploadOperation | null {
@@ -896,6 +971,7 @@ function prepareTransferActivity(operation: UploadOperation | null): void {
       })),
       activeFileId: operation.files[0]?.fileId ?? null,
       detail: null,
+      failureSequence: null,
     };
     render();
     return;
@@ -948,16 +1024,27 @@ function updateTransferActivity(operation: UploadOperation | null, response: Rem
   }
 }
 
-function failTransferActivity(operation: UploadOperation | null, reason: string): void {
+function failTransferActivity(operation: UploadOperation | null, reason: string, sequence: number | null): void {
   if (!operation || !transferActivity || transferActivity.id !== operation.transferId) return;
-  interruptTransferActivity(reason);
+  interruptTransferActivity(reason, sequence);
 }
 
-function interruptTransferActivity(reason: string): void {
+function interruptTransferActivity(reason: string, sequence: number | null = null): void {
   if (!transferActivity || transferActivity.phase === "complete") return;
+  if (transferActivity.phase === "interrupted") {
+    if (
+      sequence !== null &&
+      (transferActivity.failureSequence === null || sequence < transferActivity.failureSequence)
+    ) {
+      transferActivity.failureSequence = sequence;
+      transferActivity.detail = reason;
+    }
+    return;
+  }
   transferActivity.phase = "interrupted";
   transferActivity.activeFileId = null;
   transferActivity.detail = reason;
+  transferActivity.failureSequence = sequence;
 }
 
 function refreshTransferActivity(): void {

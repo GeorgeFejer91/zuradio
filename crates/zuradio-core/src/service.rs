@@ -7,7 +7,7 @@ use crate::catalog::{Catalog, scan_file, scan_music};
 use crate::model::StoredCommand;
 use crate::{
     Action, ActionRequest, ActionResult, AppSnapshot, Artwork, CoreError, HistoryEntry,
-    PlaybackStatus, Playlist, RepeatMode, Role, StoredState,
+    PlaybackStatus, Playlist, RecognitionStatus, RepeatMode, Role, StoredState, TrackRecognition,
 };
 
 const PROTOCOL_VERSION: u16 = 1;
@@ -84,6 +84,36 @@ impl ZuradioCore {
     pub fn catalog_file(&mut self, path: &Path, root: &Path) -> Result<AppSnapshot, CoreError> {
         let track = scan_file(path, root)?;
         self.catalog.upsert_scan(&track)?;
+        self.bump_revision();
+        self.persist()?;
+        self.snapshot()
+    }
+
+    /// Returns files whose acoustic recognition can be attempted, optionally
+    /// including earlier unavailable and failed attempts.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the catalog cannot be read.
+    pub fn recognition_candidates(
+        &self,
+        retry_failures: bool,
+    ) -> Result<Vec<(String, PathBuf)>, CoreError> {
+        self.catalog.recognition_candidates(retry_failures)
+    }
+
+    /// Stores a bounded recognition result without replacing user-visible metadata.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for an invalid result, unknown track, or storage failure.
+    pub fn set_track_recognition(
+        &mut self,
+        track_id: &str,
+        recognition: &TrackRecognition,
+    ) -> Result<AppSnapshot, CoreError> {
+        validate_recognition(recognition)?;
+        self.catalog.update_recognition(track_id, recognition)?;
         self.bump_revision();
         self.persist()?;
         self.snapshot()
@@ -589,6 +619,49 @@ fn has_local_player_priority(request: &ActionRequest) -> bool {
     )
 }
 
+fn validate_recognition(recognition: &TrackRecognition) -> Result<(), CoreError> {
+    fn validate_optional(value: Option<&str>, maximum: usize) -> bool {
+        value.is_none_or(|candidate| {
+            let trimmed = candidate.trim();
+            !trimmed.is_empty()
+                && trimmed.len() <= maximum
+                && !trimmed.chars().any(char::is_control)
+        })
+    }
+
+    if !validate_optional(recognition.provider.as_deref(), 64)
+        || !validate_optional(recognition.label.as_deref(), 400)
+        || !validate_optional(recognition.title.as_deref(), 180)
+        || !validate_optional(recognition.artist.as_deref(), 180)
+        || !validate_optional(recognition.album.as_deref(), 220)
+        || !validate_optional(recognition.genre.as_deref(), 120)
+        || !validate_optional(recognition.external_id.as_deref(), 160)
+    {
+        return Err(CoreError::InvalidInput(
+            "recognition result is invalid".into(),
+        ));
+    }
+    if recognition.status == RecognitionStatus::Recognized
+        && (recognition.provider.is_none() || recognition.label.is_none())
+    {
+        return Err(CoreError::InvalidInput(
+            "recognized tracks require a provider and label".into(),
+        ));
+    }
+    if recognition.status != RecognitionStatus::Recognized
+        && (recognition.label.is_some()
+            || recognition.title.is_some()
+            || recognition.artist.is_some()
+            || recognition.album.is_some()
+            || recognition.genre.is_some())
+    {
+        return Err(CoreError::InvalidInput(
+            "only recognized tracks can have recognition metadata".into(),
+        ));
+    }
+    Ok(())
+}
+
 fn validate_request(request: &ActionRequest) -> Result<(), CoreError> {
     if request.protocol != PROTOCOL_VERSION {
         return Err(CoreError::InvalidInput(
@@ -869,6 +942,51 @@ mod tests {
         assert_eq!(edited.artist, "Edited Artist");
         assert_eq!(edited.album, "Edited Album");
         assert_eq!(edited.year, Some(2030));
+        Ok(())
+    }
+
+    #[test]
+    fn recognition_stays_parallel_to_metadata_and_resets_when_bytes_change()
+    -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempdir()?;
+        let track_path = directory.path().join("Artist/Album/01 - Folder Title.mp3");
+        fs::create_dir_all(track_path.parent().ok_or("album path missing")?)?;
+        fs::write(&track_path, b"first audio fixture")?;
+        let mut core = ZuradioCore::in_memory()?;
+        let scanned = core.scan(&[directory.path().to_path_buf()])?;
+        let track_id = scanned.tracks.first().ok_or("track missing")?.id.clone();
+
+        let recognized = core.set_track_recognition(
+            &track_id,
+            &TrackRecognition {
+                status: RecognitionStatus::Recognized,
+                provider: Some("shazam_songrec".into()),
+                label: Some("Recognized Artist — Recognized Title".into()),
+                title: Some("Recognized Title".into()),
+                artist: Some("Recognized Artist".into()),
+                album: Some("Recognized Album".into()),
+                genre: Some("Electronic".into()),
+                external_id: Some("shazam-track-1".into()),
+                updated_at_ms: Some(1),
+            },
+        )?;
+        let track = recognized
+            .tracks
+            .first()
+            .ok_or("recognized track missing")?;
+        assert_eq!(track.title, "Folder Title");
+        assert_eq!(
+            track.recognition.label.as_deref(),
+            Some("Recognized Artist — Recognized Title")
+        );
+        assert_eq!(track.recognition.genre.as_deref(), Some("Electronic"));
+        assert!(core.recognition_candidates(false)?.is_empty());
+
+        fs::write(&track_path, b"second and different audio fixture bytes")?;
+        let rescanned = core.scan(&[directory.path().to_path_buf()])?;
+        let track = rescanned.tracks.first().ok_or("rescanned track missing")?;
+        assert_eq!(track.recognition, TrackRecognition::default());
+        assert_eq!(core.recognition_candidates(false)?.len(), 1);
         Ok(())
     }
 

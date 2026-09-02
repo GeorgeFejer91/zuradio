@@ -1,6 +1,6 @@
 # Zuradio architecture research
 
-**Checked:** 2026-09-01 (Europe/Berlin)
+**Checked:** 2026-09-01, with acoustic-recognition addendum checked 2026-09-02 (Europe/Berlin)
 **Scope:** maintained open-source music players and library servers that can inform a lightweight, cross-platform Rust desktop daemon/Tauri shell, a CLI-first command surface, remote browser control, and synchronized browser listening.
 **Evidence policy:** scores below are project-fit judgments, not benchmarks. They are based on primary GitHub repositories, source/manifests, licenses, and release pages inspected on the checked date. Repository activity is a snapshot, not a promise of future maintenance.
 
@@ -13,6 +13,35 @@ Do not fork one product wholesale. Build a small Rust authority that combines th
 3. **Polaris** for resilient library scanning, virtual mount paths, authenticated Range streaming, OpenAPI, and separation of rebuildable catalog indexes from per-user state.
 
 Use the [VDO.Ninja SDK](https://github.com/steveseguin/ninjasdk) or a normal authenticated WebSocket only as a replaceable transport. Rust must remain the sole owner of authorization, queue/player state, filesystem access, and side effects. A VDO.Ninja room, stream ID, peer UUID, transport password, or successful connection is routing information—not controller identity or authorization.
+
+## Acoustic-recognition addendum
+
+The strongest lightweight GitHub candidates are:
+
+| Rank | Candidate | Fit and boundary |
+| ---: | --- | --- |
+| 1 | [SongRec](https://github.com/marin-m/songrec) | Active official Rust Shazam client; 0.7.5 recognizes arbitrary audio files, emits JSON, needs no application API key, and sends a locally generated fingerprint rather than the original file. GPL-3.0-or-later means Zuradio must install and invoke it as a separately licensed executable instead of copying or linking its implementation into the MIT daemon. |
+| 2 | [ShazamIO](https://github.com/shazamio/ShazamIO) | MIT and asynchronous, but requires a Python runtime plus native fingerprint-extension packaging, making it a heavier desktop sidecar than SongRec's existing executable. |
+| 3 | [Chromaprint](https://github.com/acoustid/chromaprint) with the [AcoustID web service](https://acoustid.org/webservice) | Open, mature whole-file fingerprinting with MusicBrainz-oriented metadata, but a production lookup requires an AcoustID application API key and additional result-resolution logic. |
+
+The similarly named [`songrec-lib`](https://crates.io/crates/songrec-lib) was
+rejected for direct integration: its own README says it was heavily modified
+with an LLM and is not production-ready, and linking its GPL implementation
+would change Zuradio's licensing boundary. [Shezem-rs](https://github.com/Kither12/shezem-rs)
+is a fast MIT Rust matcher, but it searches only a locally indexed corpus and
+cannot provide global Shazam labels for arbitrary uploads.
+
+Self-hosted matchers such as Olaf, audiofp, and xzam are useful when the operator
+already owns a reference corpus, but they do not supply a global catalog label
+for arbitrary uploaded music. SongRec is therefore the selected integral Linux
+helper. Zuradio's installer fetches its official package, verifies a pinned
+SHA-256, retains copyright/source notices, and invokes it across the existing
+process boundary. Zuradio queues it only after immediate local catalog
+publication, limits concurrency and process output, applies a deadline, stores
+bounded provider, external ID, title, artist, album, genre, and label fields,
+and exposes explicit pending, recognized, no-match, unavailable, and error
+states. Those fields remain parallel to embedded tags, folder/filename
+inference, and persistent user corrections, while flexible search uses both.
 
 > **Non-negotiable GitHub Pages boundary:** GitHub Pages hosts only the compiled, static companion HTML/CSS/JavaScript and non-user product assets. It hosts **no music, audio/media, album art, catalog, playlists, database, passwords, tokens, signaling service, relay, WebSocket endpoint, or transcoder output**. The laptop remains the catalog/player/media authority. Internet operation still needs a live path provided by the laptop plus VDO.Ninja signaling/STUN/TURN or a separately operated HTTPS/WSS relay.
 

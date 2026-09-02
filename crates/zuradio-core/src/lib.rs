@@ -9,6 +9,7 @@ pub use catalog::Artwork;
 pub use error::{CoreError, ErrorCode};
 pub use model::{
     Action, ActionRequest, ActionResult, Actor, AppSnapshot, HistoryEntry, PlaybackStatus,
-    PlayerState, Playlist, RepeatMode, Role, StoredState, Track,
+    PlayerState, Playlist, RecognitionStatus, RepeatMode, Role, StoredState, Track,
+    TrackRecognition,
 };
 pub use service::ZuradioCore;

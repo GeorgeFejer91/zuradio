@@ -4,8 +4,10 @@ Status: protocol versions 2–3, 2026-09-01.
 
 ## Modes and trust boundary
 
-Starting a broadcast activates a password-derived data-only rendezvous plus
-fresh, unrelated private control and audio routes. The companion exposes only
+Starting the installed app activates a password-derived data-only rendezvous
+plus fresh, unrelated private control and audio routes. The supervised host
+keeps this beacon active while Zuradio runs and restores it after exhausted
+transport recovery; beacon activation never starts music. The companion exposes only
 `listen`, `control`, and `upload` buttons. After a password gesture, a
 requester/nonce-bound rendezvous beacon supplies current private coordinates;
 there are no invitation URLs. GitHub Pages serves only the static companion.
@@ -31,18 +33,28 @@ credential does not turn an upload session into a controller or listener.
 - `upload`: library upload and resulting imported metadata only; no player
   actions and no live-audio route.
 
-Stopping or restarting a broadcast revokes every grant and partial transfer.
-Because partial transfers are not resumable across daemon restarts, startup
+Restarting the secure beacon or stopping the Zuradio services revokes every
+grant and partial transfer. Normal installed mode immediately replaces a rotated
+beacon rather than leaving an app-running-but-off state. Because partial
+transfers are not resumable across daemon restarts, startup
 also purges abandoned private staging directories. Files that already passed
 `finish_file` remain safely catalogued in the visible library.
 
 ## Upload transaction
 
-Uploads use ordered operations acknowledged one at a time:
+Uploads use ordered operations with explicit receiver acknowledgements. Small
+authenticated commands remain on the JSON control channel. A mutually
+advertised `binary-v1` capability moves audio bytes onto the SDK's dedicated
+ordered binary WebRTC channel, where negotiated SCTP message limits and
+`bufferedAmount` backpressure apply. An older host can still receive the
+bounded JSON/base64 path during a rolling upgrade.
 
 1. `begin` declares a random transfer ID and every file's random ID, relative
    path, and byte size.
-2. `chunk` carries at most 8 KiB of base64 data and its exact expected offset.
+2. `chunk` carries an exact expected offset. The direct binary path carries at
+   most 64 KiB of raw audio per frame; the compatibility path carries at most
+   8 KiB as base64. The host binds binary frame metadata to the authenticated
+   grant, peer, sequence, transfer, and file before forwarding bytes to Rust.
 3. `finish_file` supplies the browser's SHA-256 digest; Rust compares it with
    the staged file.
 4. `finish_file` also parses, classifies, moves, incrementally catalogs, and
@@ -87,10 +99,23 @@ The local metadata editor can change title, artist, album, album artist, track,
 disc, and year. Overrides persist across rescans without rewriting the original
 audio tags.
 
+After each completed file is catalogued and published, a bounded two-worker
+queue invokes the installed official Rust SongRec helper. Its Shazam fingerprint
+result is stored in separate provider, external-ID, recognized title, artist,
+album, genre, and display-label columns. These values never participate in file
+placement and never replace ordinary metadata, but local and remote flexible
+search includes both metadata sets. Recognition has a 30-second deadline, sends
+only an acoustic fingerprint to the external service, and cannot delay catalogue
+publication or the next file transfer.
+
 Transfer-related development must pass the staged browser/CLI upload-download
 benchmark in `scripts/verify-data-transfer.sh` before the complete browser gate.
 The benchmark verifies immediate first-file publication, organized placement,
-source-to-download SHA-256 equality, and throughput floors.
+source-to-download SHA-256 equality, structured Shazam metadata, local and remote
+search retrieval through those fields, use of the dedicated binary channel,
+and throughput floors. A separate forced first-chunk rejection proves that the
+CLI reports the receiver error and last acknowledged stage instead of waiting
+only for the final import message.
 
 ## Password file
 

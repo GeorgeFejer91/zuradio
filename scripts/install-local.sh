@@ -25,6 +25,7 @@ npm run build
 cd "$project_dir"
 cargo test --workspace --exclude zuradio-desktop
 cargo build --release -p zuradio-daemon
+sh "$project_dir/scripts/install-songrec-helper.sh"
 
 mkdir -p "$install_root/web" "$binary_dir" "$service_dir" "$desktop_dir" "$icon_dir" "$data_dir" "$library_dir"
 chmod 0700 "$data_dir"
@@ -34,6 +35,7 @@ install -m 0755 "$project_dir/target/release/zuradio" "$binary_dir/zuradio"
 install -m 0755 "$project_dir/packaging/linux/zuradio-launch" "$binary_dir/zuradio-launch"
 install -m 0755 "$project_dir/packaging/linux/zuradio-desktop-launch" "$binary_dir/zuradio-desktop-launch"
 install -m 0644 "$project_dir/packaging/linux/zuradio.service" "$service_dir/zuradio.service"
+install -m 0644 "$project_dir/packaging/linux/zuradio-host.service" "$service_dir/zuradio-host.service"
 install -m 0644 "$project_dir/apps/zuradio-desktop/src-tauri/icons/icon.png" "$icon_dir/zuradio.png"
 if [ -f "$legacy_icon" ]; then
   rm -f -- "$legacy_icon"
@@ -48,7 +50,8 @@ sed "s|@DESKTOP_LAUNCHER@|$launcher_path|g" "$project_dir/packaging/linux/zuradi
 chmod 0644 "$desktop_dir/zuradio.desktop"
 
 systemctl --user daemon-reload
-systemctl --user enable zuradio.service
+systemctl --user enable zuradio.service zuradio-host.service
+systemctl --user stop zuradio-host.service >/dev/null 2>&1 || true
 systemctl --user restart zuradio.service
 
 attempt=0
@@ -68,6 +71,23 @@ if [ -n "$music_dir" ] && [ -d "$music_dir" ]; then
   "$binary_dir/zuradio" scan "$music_dir" >/dev/null
 fi
 
+systemctl --user restart zuradio-host.service
+attempt=0
+while [ "$attempt" -lt 100 ]; do
+  host_pid=$(systemctl --user show --property=MainPID --value zuradio-host.service)
+  if systemctl --user is-active --quiet zuradio-host.service \
+    && [ "$host_pid" -gt 0 ] \
+    && kill -0 "$host_pid" >/dev/null 2>&1; then
+    break
+  fi
+  attempt=$((attempt + 1))
+  sleep 0.1
+done
+if [ "$attempt" -ge 100 ]; then
+  printf 'Zuradio desktop broadcaster did not become ready. Inspect it with: systemctl --user status zuradio-host.service\n' >&2
+  exit 1
+fi
+
 command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$desktop_dir" || true
 command -v gtk-update-icon-cache >/dev/null 2>&1 && gtk-update-icon-cache -f -t "$icon_theme_dir" || true
-printf 'Zuradio installed. Launch it from the application menu or run: %s\n' "$binary_dir/zuradio-desktop-launch"
+printf 'Zuradio installed. Its supervised desktop broadcaster is enabled and running.\n'

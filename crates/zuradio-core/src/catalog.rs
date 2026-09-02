@@ -9,7 +9,7 @@ use lofty::tag::Accessor;
 use rusqlite::{Connection, OptionalExtension, params};
 use walkdir::WalkDir;
 
-use crate::{CoreError, StoredState, Track};
+use crate::{CoreError, RecognitionStatus, StoredState, Track, TrackRecognition};
 
 const SUPPORTED_EXTENSIONS: &[&str] = &[
     "aac", "aif", "aiff", "alac", "flac", "m4a", "mp3", "mp4", "ogg", "opus", "wav", "webm",
@@ -75,6 +75,15 @@ impl Catalog {
                 ,track_number_override INTEGER
                 ,disc_number_override INTEGER
                 ,year_override INTEGER
+                ,recognition_status TEXT NOT NULL DEFAULT 'pending'
+                ,recognition_provider TEXT
+                ,recognition_label TEXT
+                ,recognition_title TEXT
+                ,recognition_artist TEXT
+                ,recognition_album TEXT
+                ,recognition_genre TEXT
+                ,recognition_external_id TEXT
+                ,recognition_updated_ms INTEGER
             );
             CREATE INDEX IF NOT EXISTS idx_tracks_artist_album
                 ON tracks(artist COLLATE NOCASE, album COLLATE NOCASE, track_number);
@@ -84,6 +93,7 @@ impl Catalog {
             );",
         )?;
         ensure_override_columns(&connection)?;
+        ensure_recognition_columns(&connection)?;
         Ok(Self { connection })
     }
 
@@ -135,7 +145,10 @@ impl Catalog {
                     COALESCE(track_number_override, track_number),
                     COALESCE(disc_number_override, disc_number),
                     COALESCE(year_override, year),
-                    duration_ms, format, available, has_artwork
+                    duration_ms, format, available, has_artwork,
+                    recognition_status, recognition_provider, recognition_label,
+                    recognition_title, recognition_artist, recognition_album, recognition_genre,
+                    recognition_external_id, recognition_updated_ms
              FROM tracks
              WHERE available = 1
              ORDER BY artist COLLATE NOCASE, album COLLATE NOCASE,
@@ -156,7 +169,10 @@ impl Catalog {
                         COALESCE(track_number_override, track_number),
                         COALESCE(disc_number_override, disc_number),
                         COALESCE(year_override, year),
-                        duration_ms, format, available, has_artwork
+                        duration_ms, format, available, has_artwork,
+                        recognition_status, recognition_provider, recognition_label,
+                        recognition_title, recognition_artist, recognition_album, recognition_genre,
+                        recognition_external_id, recognition_updated_ms
                  FROM tracks WHERE id = ?1",
                 [id],
                 track_from_row,
@@ -213,6 +229,66 @@ impl Catalog {
             )
             .optional()
             .map_err(CoreError::from)
+    }
+
+    pub(crate) fn recognition_candidates(
+        &self,
+        retry_failures: bool,
+    ) -> Result<Vec<(String, PathBuf)>, CoreError> {
+        let query = if retry_failures {
+            "SELECT id, path
+             FROM tracks
+             WHERE available = 1
+               AND recognition_status IN ('pending', 'unavailable', 'error')
+             ORDER BY modified_ms ASC, id ASC"
+        } else {
+            "SELECT id, path
+             FROM tracks
+             WHERE available = 1
+               AND recognition_status = 'pending'
+             ORDER BY modified_ms ASC, id ASC"
+        };
+        let mut statement = self.connection.prepare(query)?;
+        let rows = statement.query_map([], |row| {
+            Ok((row.get(0)?, PathBuf::from(row.get::<_, String>(1)?)))
+        })?;
+        rows.collect::<Result<Vec<_>, _>>().map_err(CoreError::from)
+    }
+
+    pub(crate) fn update_recognition(
+        &mut self,
+        id: &str,
+        recognition: &TrackRecognition,
+    ) -> Result<(), CoreError> {
+        let changed = self.connection.execute(
+            "UPDATE tracks SET
+                recognition_status = ?2,
+                recognition_provider = ?3,
+                recognition_label = ?4,
+                recognition_title = ?5,
+                recognition_artist = ?6,
+                recognition_album = ?7,
+                recognition_genre = ?8,
+                recognition_external_id = ?9,
+                recognition_updated_ms = ?10
+             WHERE id = ?1 AND available = 1",
+            params![
+                id,
+                recognition_status_name(recognition.status),
+                recognition.provider.as_deref(),
+                recognition.label.as_deref(),
+                recognition.title.as_deref(),
+                recognition.artist.as_deref(),
+                recognition.album.as_deref(),
+                recognition.genre.as_deref(),
+                recognition.external_id.as_deref(),
+                recognition.updated_at_ms,
+            ],
+        )?;
+        if changed == 0 {
+            return Err(CoreError::NotFound("track not found".into()));
+        }
+        Ok(())
     }
 
     pub(crate) fn artwork(&self, id: &str) -> Result<Option<Artwork>, CoreError> {
@@ -272,6 +348,39 @@ fn ensure_override_columns(connection: &Connection) -> Result<(), CoreError> {
     Ok(())
 }
 
+fn ensure_recognition_columns(connection: &Connection) -> Result<(), CoreError> {
+    for (name, definition) in [
+        (
+            "recognition_status",
+            "TEXT NOT NULL DEFAULT 'pending' CHECK (recognition_status IN ('pending', 'recognized', 'no_match', 'unavailable', 'error'))",
+        ),
+        ("recognition_provider", "TEXT"),
+        ("recognition_label", "TEXT"),
+        ("recognition_title", "TEXT"),
+        ("recognition_artist", "TEXT"),
+        ("recognition_album", "TEXT"),
+        ("recognition_genre", "TEXT"),
+        ("recognition_external_id", "TEXT"),
+        ("recognition_updated_ms", "INTEGER"),
+    ] {
+        let exists = {
+            let mut statement = connection.prepare("PRAGMA table_info(tracks)")?;
+            statement
+                .query_map([], |row| row.get::<_, String>(1))?
+                .collect::<Result<Vec<_>, _>>()?
+                .iter()
+                .any(|column| column == name)
+        };
+        if !exists {
+            connection.execute(
+                &format!("ALTER TABLE tracks ADD COLUMN {name} {definition}"),
+                [],
+            )?;
+        }
+    }
+    Ok(())
+}
+
 fn track_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
     Ok(Track {
         id: row.get(0)?,
@@ -286,7 +395,43 @@ fn track_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<Track> {
         format: row.get(9)?,
         available: row.get(10)?,
         has_artwork: row.get(11)?,
+        recognition: TrackRecognition {
+            status: recognition_status_from_name(&row.get::<_, String>(12)?)?,
+            provider: row.get(13)?,
+            label: row.get(14)?,
+            title: row.get(15)?,
+            artist: row.get(16)?,
+            album: row.get(17)?,
+            genre: row.get(18)?,
+            external_id: row.get(19)?,
+            updated_at_ms: row.get(20)?,
+        },
     })
+}
+
+const fn recognition_status_name(status: RecognitionStatus) -> &'static str {
+    match status {
+        RecognitionStatus::Pending => "pending",
+        RecognitionStatus::Recognized => "recognized",
+        RecognitionStatus::NoMatch => "no_match",
+        RecognitionStatus::Unavailable => "unavailable",
+        RecognitionStatus::Error => "error",
+    }
+}
+
+fn recognition_status_from_name(value: &str) -> rusqlite::Result<RecognitionStatus> {
+    match value {
+        "pending" => Ok(RecognitionStatus::Pending),
+        "recognized" => Ok(RecognitionStatus::Recognized),
+        "no_match" => Ok(RecognitionStatus::NoMatch),
+        "unavailable" => Ok(RecognitionStatus::Unavailable),
+        "error" => Ok(RecognitionStatus::Error),
+        _ => Err(rusqlite::Error::InvalidColumnType(
+            12,
+            "recognition_status".into(),
+            rusqlite::types::Type::Text,
+        )),
+    }
 }
 
 pub(crate) fn scan_music(roots: &[PathBuf]) -> Result<Vec<ScannedTrack>, CoreError> {
@@ -376,6 +521,60 @@ fn upsert_tracks(
             format = excluded.format,
             has_artwork = excluded.has_artwork,
             available = 1,
+            recognition_status = CASE
+                WHEN tracks.file_size != excluded.file_size
+                  OR tracks.modified_ms != excluded.modified_ms
+                THEN 'pending'
+                ELSE tracks.recognition_status
+            END,
+            recognition_provider = CASE
+                WHEN tracks.file_size != excluded.file_size
+                  OR tracks.modified_ms != excluded.modified_ms
+                THEN NULL
+                ELSE tracks.recognition_provider
+            END,
+            recognition_label = CASE
+                WHEN tracks.file_size != excluded.file_size
+                  OR tracks.modified_ms != excluded.modified_ms
+                THEN NULL
+                ELSE tracks.recognition_label
+            END,
+            recognition_title = CASE
+                WHEN tracks.file_size != excluded.file_size
+                  OR tracks.modified_ms != excluded.modified_ms
+                THEN NULL
+                ELSE tracks.recognition_title
+            END,
+            recognition_artist = CASE
+                WHEN tracks.file_size != excluded.file_size
+                  OR tracks.modified_ms != excluded.modified_ms
+                THEN NULL
+                ELSE tracks.recognition_artist
+            END,
+            recognition_album = CASE
+                WHEN tracks.file_size != excluded.file_size
+                  OR tracks.modified_ms != excluded.modified_ms
+                THEN NULL
+                ELSE tracks.recognition_album
+            END,
+            recognition_genre = CASE
+                WHEN tracks.file_size != excluded.file_size
+                  OR tracks.modified_ms != excluded.modified_ms
+                THEN NULL
+                ELSE tracks.recognition_genre
+            END,
+            recognition_external_id = CASE
+                WHEN tracks.file_size != excluded.file_size
+                  OR tracks.modified_ms != excluded.modified_ms
+                THEN NULL
+                ELSE tracks.recognition_external_id
+            END,
+            recognition_updated_ms = CASE
+                WHEN tracks.file_size != excluded.file_size
+                  OR tracks.modified_ms != excluded.modified_ms
+                THEN NULL
+                ELSE tracks.recognition_updated_ms
+            END,
             file_size = excluded.file_size,
             modified_ms = excluded.modified_ms",
     )?;
@@ -471,6 +670,7 @@ fn inspect_track(path: &Path, root: &Path) -> Result<ScannedTrack, CoreError> {
             format,
             available: true,
             has_artwork,
+            recognition: TrackRecognition::default(),
         },
         canonical_path: path.to_owned(),
         file_size: metadata.len(),

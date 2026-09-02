@@ -11,14 +11,7 @@ cleanup() {
 }
 trap cleanup EXIT INT TERM
 
-if [ ! -x "$project_dir/target/release/zuradio" ]; then
-  printf 'Browser gate blocked: build the optimized daemon with cargo build --release -p zuradio-daemon.\n' >&2
-  exit 2
-fi
-if [ ! -f "$project_dir/web/dist/host/index.html" ]; then
-  printf 'Browser gate blocked: build production web assets with npm run build in web/.\n' >&2
-  exit 2
-fi
+mkdir -p "$project_dir/target"
 if [ -z "${ZURADIO_TEST_PASSWORD_FILE:-}" ]; then
   generated_password=$(mktemp "$project_dir/target/zuradio-gate-password.XXXXXX")
   chmod 0600 "$generated_password"

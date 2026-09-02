@@ -12,7 +12,8 @@ use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
 
-pub(crate) const MAX_CHUNK_BYTES: usize = 8 * 1024;
+pub(crate) const MAX_CHUNK_BYTES: usize = 64 * 1024;
+const MAX_ENCODED_CHUNK_BYTES: usize = MAX_CHUNK_BYTES.div_ceil(3) * 4;
 const MAX_FILES: usize = 512;
 const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_BATCH_BYTES: u64 = 16 * 1024 * 1024 * 1024;
@@ -246,7 +247,7 @@ impl UploadManager {
     ) -> Result<UploadOutcome, UploadError> {
         validate_id(transfer_id)?;
         validate_id(file_id)?;
-        if encoded.len() > 12_000 {
+        if encoded.len() > MAX_ENCODED_CHUNK_BYTES {
             return Err(UploadError::TooLarge);
         }
         let bytes = STANDARD

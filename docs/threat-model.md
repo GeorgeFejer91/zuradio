@@ -15,6 +15,9 @@ Status: MVP security contract, 2026-09-01.
 - GitHub Pages and its request logs.
 - Public signaling, STUN, and TURN infrastructure.
 - Remote browsers, received data-channel messages, and peer display names.
+- The separately licensed SongRec helper and Shazam response. Zuradio passes
+  only one already-catalogued local audio path to its pinned executable, bounds
+  time and captured output, and validates every stored response field.
 - The 24-hour credential in companion origin storage. It is a short-lived
   bearer secret exposed to same-origin script, so CSP, dependency pinning,
   framing refusal, device binding, expiry, and the local Forget action are part
@@ -38,10 +41,10 @@ but does not receive arbitrary filesystem or process authority.
   domain-separated PBKDF2/HMAC operations and compare mutual proofs in constant
   time.
 - Generate broadcast routing credentials from operating-system randomness, keep
-  them memory-only, and discard them on Stop or process exit. Keep mode, scope,
+  them memory-only, and discard them on secure rotation or process exit. Keep mode, scope,
   expiry, peer binding, broadcast epoch, and replay sequence in Rust.
 - Keep transport, controller, listener, and media secrets independent. Rotating
-  or stopping a broadcast revokes its complete epoch.
+  the beacon or stopping the host revokes its complete epoch.
 - Validate one versioned JSON schema. Reject unknown actions and unknown fields.
 - Resolve media IDs through the catalog. Never accept a remote path. Canonicalize
   scan roots, reject escapes and special files, and handle symlinks explicitly.
@@ -50,8 +53,11 @@ but does not receive arbitrary filesystem or process authority.
   committing the batch; and discard partial transfers on abort/Stop/restart.
 - Expose no shell, process, arbitrary path, URL, SQL, or generic command adapter.
   Remote peers can submit only the closed Rust action schema.
-- Require an explicit local gesture to start broadcasting. Stop media tracks,
-  close peers, clear grants, and release the audio graph on stop/page shutdown.
+- Treat installation and enablement of the supervised user service as the local
+  decision to keep the password-protected beacon available whenever Zuradio is
+  running. Beacon startup must not start playback. A secure restart closes media
+  tracks and peers, clears grants, discards incomplete uploads, and immediately
+  establishes a fresh epoch; stopping the services remains the deliberate off.
 - Never put access keys in query strings, logs, local storage, analytics, crash
   reports, or GitHub Pages configuration.
 - Treat password-derived discovery as a rendezvous hint, not identity. Bind
@@ -82,6 +88,8 @@ protocol. Direct Internet exposure of the loopback daemon is out of scope.
 - Local bootstrap fragment removal and 0600 runtime credential storage.
 - Single-password PBKDF2/HMAC and server-proof verification, mode denial,
   peer/session binding, monotonic replay rejection, and broadcast Stop revocation.
+- Default-on beacon recovery without a playback transition, plus secure beacon
+  restart and service-stop revocation.
 - Password-gated folder/file upload, wrong-password rejection before audio or
   authority exposure, digest/offset/path validation, managed repository commit,
   metadata inference, and persistent local metadata correction.

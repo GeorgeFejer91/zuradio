@@ -8,6 +8,13 @@ runtime_file="$HOME/.local/share/zuradio/runtime.json"
 browser_profile="$HOME/.local/share/zuradio/chromium-profile"
 browser=
 
+if [ "${ZURADIO_HOST_SUPERVISED:-0}" != 1 ] \
+  && command -v systemctl >/dev/null 2>&1 \
+  && systemctl --user cat zuradio-host.service >/dev/null 2>&1; then
+  systemctl --user restart zuradio-host.service
+  exit 0
+fi
+
 if command -v systemctl >/dev/null 2>&1; then
   systemctl --user start zuradio.service >/dev/null 2>&1 || true
 fi

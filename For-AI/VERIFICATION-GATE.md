@@ -22,7 +22,9 @@ Low latency, fast connection establishment, and immediate UI feedback are absolu
 ## Required completion sequence
 
 1. Add or update a Playwright scenario under `web/tests/e2e/` for every changed user workflow, regression, permission boundary, or responsive UI state. Assert the outcome a user experiences, not merely an HTTP response or implementation detail.
-2. Build the optimized Rust daemon and production web assets.
+2. Build the optimized Rust daemon and production web assets. The repository
+   gate scripts also rebuild these bytes themselves; a merely existing release
+   executable or `web/dist` directory is not freshness evidence.
 3. For every data-transfer-related change, run `scripts/verify-data-transfer.sh`
    and retain its staged byte-integrity and throughput artifact.
 4. Run `scripts/verify-feature-completion.sh`. It runs the focused transfer gate
@@ -32,6 +34,15 @@ Low latency, fast connection establishment, and immediate UI feedback are absolu
    responsive UI scenarios.
 5. If the change affects the installed desktop shell or public companion, cold-launch the installed app and exercise the public GitHub Pages site against that real app. Confirm that the browser receives the expected stream/control result; a backend `On` flag alone is not proof.
    On this Linux installation, launch the app with an inspection port and run `node web/scripts/verify-installed-public.mjs` with `ZURADIO_TEST_PASSWORD_FILE` and `ZURADIO_INSPECTOR_URL` set. Do not print the password or bootstrap URL.
+   Changes to the supervised Linux host must additionally prove that
+   `zuradio-host.service` is enabled and active, terminate only its exact
+   resolved `MainPID`, observe systemd replace it with a different running PID,
+   and then repeat the public-companion stream/control check. Normal installed
+   mode must expose a non-null password-discovery session whenever the host is
+   active. Force that session to disappear through the authenticated local test
+   path, observe automatic replacement with a different epoch, and prove the
+   player status did not change. Beacon readiness is not playback. Also verify
+   that stopping both Zuradio user services is still the deliberate off state.
 6. Record the command, pass count, browser/runtime, transfer benchmark JSON,
    and any intentionally untested physical-device or release-channel limits in
    the final handoff.

@@ -4,14 +4,15 @@ Zuradio turns one laptop into a private music library, local player, and live
 radio source. The Rust service owns the catalog, queue, playlists, favorites,
 history, authorization, and every state change. **Zuradio Web Companion** is a
 static phone-friendly listener/controller that connects to the laptop's active
-broadcast. The installed desktop shell starts a fresh broadcast automatically
-on every launch.
+remote-access beacon. The installed desktop shell starts at login, activates a
+fresh password-protected beacon, and restores it after a host or transport
+failure. This makes the laptop discoverable; it does not start music playback.
 
 Music is never uploaded to or hosted by the companion site. GitHub Pages ships
-only about 180 KiB of HTML, CSS, and JavaScript. While broadcasting, the laptop
+only about 180 KiB of HTML, CSS, and JavaScript. While music is playing, the laptop
 decodes the selected local file and publishes that same live audio through the
-official VDO.Ninja SDK/WebRTC path. Turning the laptop or broadcast off makes
-the stream unavailable.
+official VDO.Ninja SDK/WebRTC path. Turning the laptop or Zuradio host off makes
+remote access and the stream unavailable.
 
 ## What works
 
@@ -19,7 +20,8 @@ the stream unavailable.
   catalog scans with metadata and bounded embedded-artwork reads. Real WAV,
   FLAC, AIFF, MP3, and OGG fixtures are included in browser qualification.
 - Search and browsing by library, album, artist, favorite, history, and
-  persistent ordered playlist.
+  persistent ordered playlist. Search covers normal tags/folder names and
+  parallel Shazam title, artist, album, and genre fields.
 - One canonical queue with play, pause, stop, next, previous, seek, volume,
   mute, shuffle with order restoration, and off/all/one repeat modes.
 - A complete CLI over the same typed Rust action model used by the UI.
@@ -27,9 +29,12 @@ the stream unavailable.
   Linux opens it in a dedicated Chromium app window for complete WebRTC and
   unattended audio support; the cross-platform Tauri v2 shell remains a
   least-privilege native fallback with no WebView IPC permissions.
-- Default-on broadcasting from the installed desktop shell, explicit Start/Stop
-  controls, and password-discovered, separately scoped Listen, Control, and
-  Upload modes with no invitation URLs.
+- A supervised Linux desktop-host service that opens at login and restarts the
+  Chromium host if its window or process exits. Its normal operating mode keeps
+  the password-protected discovery beacon active for as long as the app runs.
+- Always-ready remote access from the installed desktop shell, a secure beacon
+  restart control, and password-discovered, separately scoped Listen, Control,
+  and Upload modes with no invitation URLs. Beacon readiness never starts a song.
 - A read-only listener UI, a controller UI with player, queue, favorite, and
   playlist controls, and a folder/file upload UI that writes directly to this
   laptop rather than GitHub Pages.
@@ -38,14 +43,18 @@ the stream unavailable.
   folder/file names, and organized by artist, album, year, track, and title.
   Metadata can be corrected from the desktop UI and those overrides survive
   rescans.
+- Automatic Rust SongRec/Shazam recognition after each new song is published.
+  The installer supplies a pinned official helper; its independently stored
+  title, artist, album, genre, match label, and provider ID are searchable but
+  never rename, overwrite, or reorganize the original file.
 - Real WebRTC audio and data channels through `@vdoninja/sdk` 1.5.5. VDO.Ninja
   transports packets; Rust independently proves and authorizes controllers.
 
 ## Install on Linux
 
 Requirements are Rust, Node.js 22+, npm, a Chromium-class browser, systemd user
-services, and the normal desktop helpers (`xdg-open` and `xdg-user-dir`). No
-root access is required.
+services, `curl`, `dpkg-deb`, and the normal desktop helpers (`xdg-open` and
+`xdg-user-dir`). No root access is required.
 
 ```sh
 ./scripts/install-local.sh
@@ -53,11 +62,16 @@ root access is required.
 
 The installer performs locked web installation, TypeScript and unit checks, a
 production web build, Rust tests, and an optimized Rust build before replacing
-the installed files. It then installs:
+the local binaries. It also downloads the official Rust SongRec 0.7.5 package
+from its maintainer's PPA, verifies a pinned SHA-256 digest, and installs only
+its separately licensed helper and notices. It enables both the Rust authority
+and supervised desktop host as user services, so Zuradio opens with a
+discoverable beacon automatically at login and recovers if the host exits.
+It then installs:
 
 - `~/.local/bin/zuradio`, `zuradio-launch`, and `zuradio-desktop-launch`;
-- `~/.local/lib/zuradio/` for the daemon and local UI;
-- `~/.config/systemd/user/zuradio.service`;
+- `~/.local/lib/zuradio/` for the daemon, local UI, and verified SongRec helper;
+- `~/.config/systemd/user/zuradio.service` and `zuradio-host.service`;
 - `~/.local/share/applications/zuradio.desktop`; and
 - private state under `~/.local/share/zuradio/`.
 
@@ -140,11 +154,24 @@ Files are transferred sequentially over the encrypted live data bridge and
 checked with SHA-256. Each completed file is moved immediately into
 `Zuradio Library` inside the computer's Music folder, catalogued incrementally,
 and pushed into every open library view without waiting for the rest of the
-selection. While this happens, the local app shows the current incoming file,
+selection. A bounded background recognition queue starts for that song only
+after publication, with at most two recognizers running at once, so an offline
+or slow provider cannot hold up the catalog or transfer. While this happens, the local app shows the current incoming file,
 acknowledged bytes and percentage, and how many tracks are already catalogued;
 it then reports completion or interruption. Private partial files remain under
 Zuradio app data. Upload limits are 512 files, 512 MiB per file, and 16 GiB per selection. See
 [the upload protocol](docs/upload-protocol.md).
+
+Automatic acoustic metadata uses the official Rust
+[SongRec](https://github.com/marin-m/songrec) helper installed with Zuradio.
+The MIT-licensed Zuradio daemon does not copy or link SongRec's GPL code; it
+invokes the separately installed executable with a 30-second limit and consumes
+only bounded JSON. The UI stores and displays a parallel `Artist — Title` match,
+album, and genre, and local/remote search uses those fields alongside ordinary
+tags and folder-derived metadata. A manual **Scan library** retries helper or
+network errors. SongRec creates a fingerprint locally and sends the
+fingerprint—not the original audio file—to Shazam's service, so recognition
+needs Internet access and is not a fully offline recognizer.
 
 An external program or Codex agent can use the same browser bridge through the
 machine-readable upload command. It accepts repeated individual files or one
@@ -168,9 +195,10 @@ by GitHub Pages.
 
 ## Broadcast to a phone
 
-1. Open Zuradio on the laptop. The desktop shell rotates any stale session,
-   unlocks its audio graph, and starts broadcasting automatically.
-2. Select a track locally or from an authenticated Control connection.
+1. Log in to this computer. Zuradio opens automatically, rotates any stale
+   session, and keeps its password-protected discovery beacon available. No
+   music starts merely because the beacon is active.
+2. Select and play a track locally or from an authenticated Control connection.
 3. Open the Zuradio Web Companion on a phone and tap **Listen**, **Control**, or
    **Upload**. The first connection prompts for the shared password; that
    browser then reconnects without another prompt for 24 hours. No URL needs to
@@ -179,9 +207,10 @@ by GitHub Pages.
    player, queue, library, favorites, and a persistent playlist library. Upload
    accepts files or folders for the managed laptop repository. Rust grants only
    the selected mode after mutual proof.
-5. Choose **Stop broadcast** to close peers, discard partial uploads, and revoke
-   the complete broadcast epoch. It stays stopped until manually restarted or
-   the desktop app is launched again.
+5. Choose **Restart secure beacon** to revoke current peers and grants, discard
+   incomplete uploads, and immediately establish a fresh discoverable epoch.
+   Closing the supervised window opens it again; stopping the Zuradio user
+   services is the deliberate way to turn remote access off.
 
 The password derives only a deterministic, data-only rendezvous route. The
 laptop returns fresh private session coordinates over the exact requester-bound

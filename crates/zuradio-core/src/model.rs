@@ -15,6 +15,33 @@ pub struct Track {
     pub format: String,
     pub available: bool,
     pub has_artwork: bool,
+    #[serde(default)]
+    pub recognition: TrackRecognition,
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RecognitionStatus {
+    #[default]
+    Pending,
+    Recognized,
+    NoMatch,
+    Unavailable,
+    Error,
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct TrackRecognition {
+    pub status: RecognitionStatus,
+    pub provider: Option<String>,
+    pub label: Option<String>,
+    pub title: Option<String>,
+    pub artist: Option<String>,
+    pub album: Option<String>,
+    pub genre: Option<String>,
+    pub external_id: Option<String>,
+    pub updated_at_ms: Option<i64>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

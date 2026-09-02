@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 pub mod client;
+mod recognition;
 pub mod server;
 mod upload;
 

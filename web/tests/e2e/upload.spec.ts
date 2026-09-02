@@ -100,11 +100,9 @@ test("uploads from a Windows Chromium profile while ignoring a competing stale h
 
     currentHost = await authenticatedHost(browser);
     await currentHost.getByRole("button", { name: /Broadcast/ }).click();
-    await currentHost.getByTestId("stop-broadcast").click();
-    await expect(currentHost.getByTestId("start-broadcast")).toBeVisible();
-    await currentHost.getByTestId("start-broadcast").click();
+    await currentHost.getByTestId("restart-broadcast").click();
     await expect(currentHost.getByTestId("stop-broadcast")).toBeVisible({ timeout: 35_000 });
-    await expect(staleHost.getByText("A newer Zuradio window replaced this broadcast", { exact: true })).toBeVisible({
+    await expect(staleHost.getByText("A newer Zuradio window replaced this remote-access beacon", { exact: true })).toBeVisible({
       timeout: 5_000,
     });
 
@@ -170,6 +168,70 @@ test("uploads an individual file through the external browser CLI", async ({ bro
     expect(result.connectionMs).toBeLessThan(30_000);
     expect(result.uploadMs).toBeGreaterThan(0);
     expect(result.bytesPerSecond).toBeGreaterThan(32 * 1024);
+  } finally {
+    await stopBroadcast(host);
+  }
+});
+
+test("CLI reports the receiver's first-chunk failure instead of a final timeout", async ({ browser }) => {
+  test.skip(!fixture || !fs.existsSync(fixture), "Set ZURADIO_UPLOAD_FIXTURE to a valid audio file");
+  test.setTimeout(150_000);
+  const host = await authenticatedHost(browser);
+  try {
+    await startFreshBroadcast(host);
+    let rejectedChunk = false;
+    let rejectedAt = 0;
+    await host.route("**/api/v1/remote/upload", async (route) => {
+      const body = route.request().postDataJSON() as { operation?: { kind?: string } };
+      if (body.operation?.kind === "chunk") {
+        if (!rejectedChunk) {
+          rejectedChunk = true;
+          rejectedAt = Date.now();
+        }
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({
+            code: "storage",
+            message: "forced first-chunk receiver gate rejection",
+            revision: null,
+          }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    const cliResult = execFileAsync(
+        process.execPath,
+        [
+          uploadCli,
+          "--url",
+          companionBase,
+          "--password-file",
+          passwordPath,
+          "--file",
+          fixture as string,
+          "--timeout-ms",
+          "60000",
+        ],
+        { timeout: 120_000, maxBuffer: 1024 * 1024 },
+      ).then(
+        (result) => ({ stderr: result.stderr }),
+        (error: unknown) => ({ stderr: String((error as { stderr?: string }).stderr ?? error) }),
+      );
+    await expect(host.getByTestId("local-transfer-status")).toContainText(
+      "forced first-chunk receiver gate rejection",
+      { timeout: 60_000 },
+    );
+    const { stderr } = await cliResult;
+    expect(rejectedChunk).toBe(true);
+    expect(Date.now() - rejectedAt, "CLI must surface a receiver failure without waiting for final success").toBeLessThan(
+      15_000,
+    );
+    expect(stderr).toContain("forced first-chunk receiver gate rejection");
+    expect(stderr).toContain("last receiver stage:");
+    expect(stderr).not.toContain("waiting for locator");
   } finally {
     await stopBroadcast(host);
   }

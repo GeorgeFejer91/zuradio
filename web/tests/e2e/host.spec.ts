@@ -297,15 +297,35 @@ test("starts password discovery without exposing invitation URLs and revokes it"
   await expect(page.getByTestId("start-broadcast")).toBeVisible();
 });
 
-test("starts broadcasting automatically when the host opens", async ({ page }) => {
+test("keeps the discovery beacon ready without changing playback", async ({ page }) => {
   test.setTimeout(60_000);
   await page.evaluate(() => fetch("/api/v1/broadcast/stop", { method: "POST" }));
   await page.goto(`${runtime.baseUrl}/host/`);
   await expect(page.getByRole("button", { name: /Broadcast On/ })).toBeVisible({ timeout: 35_000 });
   await page.getByRole("button", { name: /Broadcast On/ }).click();
-  await expect(page.getByTestId("stop-broadcast")).toBeVisible({ timeout: 35_000 });
-  await page.getByTestId("stop-broadcast").click();
-  await expect(page.getByTestId("start-broadcast")).toBeVisible();
+  await expect(page.getByText("Discoverable", { exact: true })).toBeVisible({ timeout: 35_000 });
+  await expect(page.getByText(/Music plays only when a player command starts it/)).toBeVisible();
+  await expect(page.getByTestId("restart-broadcast")).toBeVisible();
+  await expect(page.getByTestId("stop-broadcast")).toHaveCount(0);
+
+  const before = await page.evaluate(async () => ({
+    broadcast: await fetch("/api/v1/broadcast").then((response) => response.json()),
+    playerStatus: await fetch("/api/v1/snapshot").then((response) => response.json()).then((state) => state.player.status),
+  }));
+  await page.evaluate(() => fetch("/api/v1/broadcast/stop", { method: "POST" }));
+  await expect
+    .poll(
+      () => page.evaluate(() => fetch("/api/v1/broadcast").then((response) => response.json())),
+      { timeout: 35_000 },
+    )
+    .not.toBeNull();
+  const after = await page.evaluate(async () => ({
+    broadcast: await fetch("/api/v1/broadcast").then((response) => response.json()),
+    playerStatus: await fetch("/api/v1/snapshot").then((response) => response.json()).then((state) => state.player.status),
+  }));
+  expect(after.broadcast.sessionId).not.toBe(before.broadcast.sessionId);
+  expect(after.playerStatus).toBe(before.playerStatus);
+  await expect(page.getByText("Discoverable", { exact: true })).toBeVisible();
 });
 
 test("is keyboard reachable and responsive at phone width", async ({ page }) => {

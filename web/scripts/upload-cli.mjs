@@ -68,19 +68,28 @@ async function upload(options) {
     }
     const connectionMs = Math.round(performance.now() - connectionStarted);
 
-    const picker = target.kind === "folder" ? page.locator("[data-upload-folder]") : page.locator("[data-upload-files]");
-    await picker.setInputFiles(target.kind === "folder" ? target.path : target.paths);
-    const selection = (await page.getByTestId("upload-selection").textContent())?.trim() ?? "";
-    const selectedCount = Number.parseInt(selection, 10);
-    if (!Number.isSafeInteger(selectedCount) || selectedCount < 1) {
-      throw new Error("the selected path contains no supported audio files");
-    }
-
-    const sourceBytes = uploadPaths(target).reduce((total, filePath) => total + fs.statSync(filePath).size, 0);
+    const sourcePaths = uploadPaths(target);
+    if (sourcePaths.length < 1) throw new Error("the selected path contains no supported audio files");
+    await selectUploadFiles(page, target, sourcePaths.length);
+    const selectedCount = sourcePaths.length;
+    const sourceBytes = sourcePaths.reduce((total, filePath) => total + fs.statSync(filePath).size, 0);
     const uploadStarted = performance.now();
     await page.getByTestId("upload").click();
     const completion = page.getByTestId("upload-progress").filter({ hasText: /tracks? added to the laptop library/i });
-    await completion.waitFor({ timeout: options.timeoutMs });
+    try {
+      await Promise.race([
+        completion.waitFor({ timeout: options.timeoutMs }),
+        page
+          .getByRole("alert")
+          .waitFor({ state: "visible", timeout: options.timeoutMs })
+          .then(() => Promise.reject(new Error("the receiving laptop reported an upload error"))),
+      ]);
+    } catch (error) {
+      const alert = (await page.getByRole("alert").textContent().catch(() => ""))?.trim();
+      const progress = (await page.getByTestId("upload-progress").textContent().catch(() => ""))?.trim();
+      const reason = alert || browserErrors.at(-1) || messageOf(error);
+      throw new Error(progress ? `${reason} (last receiver stage: ${progress})` : reason);
+    }
     const completionText = (await completion.textContent())?.trim() ?? "";
     const imported = await page.locator(".imported-list li").evaluateAll((items) =>
       items.map((item) => ({
@@ -104,6 +113,21 @@ async function upload(options) {
     };
   } finally {
     await browser.close();
+  }
+}
+
+async function selectUploadFiles(page, target, expectedCount) {
+  const expectedText = `${expectedCount} file${expectedCount === 1 ? "" : "s"} selected`;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const picker =
+      target.kind === "folder" ? page.locator("[data-upload-folder]") : page.locator("[data-upload-files]");
+    await picker.setInputFiles(target.kind === "folder" ? target.path : target.paths);
+    try {
+      await page.getByTestId("upload-selection").filter({ hasText: expectedText }).waitFor({ timeout: 5_000 });
+      return;
+    } catch (error) {
+      if (attempt === 2) throw error;
+    }
   }
 }
 

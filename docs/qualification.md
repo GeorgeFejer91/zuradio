@@ -1,6 +1,6 @@
 # Zuradio release qualification
 
-Qualification date: 2026-09-01, Europe/Berlin.
+Qualification dates: 2026-09-01 through 2026-09-02, Europe/Berlin.
 
 ## Result
 
@@ -8,6 +8,35 @@ Zuradio is an installed Linux release candidate on this laptop: Rust service,
 complete CLI, dedicated Chromium WebRTC app window, least-privilege Tauri
 fallback, Debian package, AppImage, and public Web Companion. Native packages remain unsigned, and physical-phone,
 forced-TURN, and endurance qualification remain release-channel gates.
+
+### 2026-09-02 acoustic-recognition and transfer addendum
+
+- The final mandatory `scripts/verify-data-transfer.sh` run passed in Chromium
+  with two real audio files: 9,729,283 source bytes, first incremental catalog
+  publication in 9,079 ms, deterministic asynchronous recognition in 23,805 ms,
+  upload at 409,086 B/s, authenticated byte-exact download at 31,183,599 B/s,
+  and two originals in the visible organized library.
+- The subsequent unfiltered `scripts/verify-feature-completion.sh` run passed
+  all 22 scenarios in 5.5 minutes, including the repeated staged transfer gate,
+  Chromium, Firefox, and WebKit compatibility, the external browser CLI, and
+  folder/file picker replacement.
+- The installed public-companion check passed against the real five-track
+  catalog: listener 3,893 ms, controller 2,874 ms, control-to-upload 3,913 ms,
+  upload-to-control 2,941 ms, command acknowledgement 289 ms, trusted reconnect
+  2,409 ms, trusted command acknowledgement 149 ms, and one received live audio
+  track.
+- SongRec integration is optional and external. SongRec is not installed on
+  this computer, so all five current tracks correctly expose the explicit
+  `unavailable` state. The deterministic gate executable proves that a provider
+  result is stored and rendered independently without replacing normal metadata.
+- The installed Linux host is now supervised by the enabled
+  `zuradio-host.service`. Terminating only its resolved service-owned PID caused
+  systemd to replace PID 315459 with PID 315753 in approximately four seconds;
+  the Rust authority remained healthy. The subsequent public-companion check
+  passed with listener connection in 3,401 ms, controller connection in 2,876
+  ms, control-to-upload in 2,393 ms, upload-to-control in 2,402 ms, command
+  acknowledgement in 84 ms, trusted reconnect in 2,434 ms, and one received
+  live audio track. Supervision was restored enabled and active after inspection.
 
 ## Installed result
 
@@ -231,3 +260,71 @@ The release candidate is installed, pinned, automatically broadcasting, plays
 and catalogs local music, exposes its full CLI, and uses the public static
 companion for the passing low-latency WebRTC path without hosting the music
 collection.
+
+## 2026-09-02 always-ready beacon and acoustic catalogue addendum
+
+The current source and installed Linux app now treat remote availability as an
+always-ready, password-protected discovery beacon that is independent of music
+playback. Normal installed mode starts the beacon automatically with the user
+desktop session, recovers a removed or failed session, and offers a secure
+restart instead of a persistent Stop button. Explicit Stop remains available in
+the manual browser qualification mode, and stopping both user services remains
+the deliberate fully-off state.
+
+Automatic acoustic recognition is installed as the official SongRec 0.7.5
+Rust executable in a private helper directory. The installer downloads the
+pinned official x86_64 package, requires SHA-256
+`39d8c8449015ebd4d2aa46905737a1d0c75fb92721711899460d7c6bdef076bd`,
+checks runtime linkage and the exact version, and installs the GPL-3.0-or-later
+notice beside it. Zuradio invokes it across a process boundary and remains
+separately licensed. Recognition title, artist, album, genre, label, provider,
+external ID, status, and timestamp are stored alongside—not over—file, folder,
+and embedded-tag metadata. Host and companion search include both metadata
+families.
+
+Current evidence:
+
+- `scripts/verify-data-transfer.sh`: 1/1 passed. The 9,729,283-byte staged
+  upload catalogued its first completed song in 7,071 ms, completed in 17,937
+  ms at 542,414 bytes/s, completed deterministic recognition in 17,959 ms, and
+  downloaded byte-exactly in 188 ms at 51,751,505 bytes/s. Both files appeared
+  in the organized library structure.
+- `scripts/verify-feature-completion.sh`: 22/22 passed in 4.8 minutes across
+  Chromium plus the Firefox and WebKit compatibility profiles. This includes
+  forced beacon-session loss with automatic replacement and unchanged player
+  state, the Windows Chromium stale-host upload, external browser CLI upload,
+  folder upload, local/remote Shazam-only search, authentication, role and
+  sequence boundaries, and the complete existing player/library matrix.
+- The isolated Windows Chromium stale-host scenario passed independently in
+  23.7 seconds. Qualification now generates an isolated password by default so
+  a developer's installed beacon cannot compete with a test daemon that happens
+  to use the same real password.
+- Installed catalogue scan: 5 available tracks; all 5 reached recognition
+  status `recognized` through the installed SongRec helper.
+- Both `zuradio.service` and `zuradio-host.service` are enabled and active. An
+  exact `MainPID` termination was replaced by systemd with a different running
+  PID in 3.6 seconds. Stopping both services produced the deliberate inactive
+  state, after which both were restored.
+- The installed Chromium shell and the public GitHub Pages companion passed the
+  cold-launch gate. Forced beacon recovery took 95 ms without changing the
+  player; listener connection took 5,914 ms, controller connection 2,890 ms,
+  control/upload switches 3,923/3,922 ms, command acknowledgements 135/145 ms,
+  and a live audio track was received. The loopback inspector was closed and
+  the supervised host restored after the run. A final read-only public listener
+  check against that restored service connected in 3,910 ms and received its
+  live audio track.
+- Rust unit/integration tests: 32 passed (15 core, 16 daemon, 1 CLI). TypeScript
+  typechecking and 4 Vitest tests passed. `cargo fmt --check`, the CI-equivalent
+  Clippy command (`--workspace --exclude zuradio-desktop --all-targets --locked
+  -- -D warnings`), shell/JavaScript syntax checks, systemd unit verification,
+  and `git diff --check` passed. Workspace-wide Clippy including the unchanged
+  Tauri GTK crate could not start because this host currently lacks the
+  `pkg-config` executable; the installed Chromium shell was exercised by the
+  full public runtime gate instead.
+
+The installed public verifier waits for the actual host UI to reach
+`Discoverable`, not merely for the Rust authority to allocate a session. This
+keeps its 15-second connection ceiling tied to a genuinely ready beacon. An
+initial run that started the timer before WebRTC announcement measured 22,170
+ms and was rejected; the readiness assertion was corrected without weakening
+the latency ceiling, and the complete installed/public rerun passed.

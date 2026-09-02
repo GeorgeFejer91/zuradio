@@ -1,6 +1,6 @@
 import "./style.css";
 
-import type { Action, AppSnapshot, ImportedFile, Playlist, RemoteMode } from "./types";
+import type { Action, AppSnapshot, ImportedFile, Playlist, RemoteMode, Track } from "./types";
 import { isSupportedAudioFileName, SUPPORTED_AUDIO_ACCEPT } from "./formats";
 import { icon, type IconName } from "./icons";
 import { CompanionBridge, type PublicNowPlaying } from "./vdo";
@@ -96,6 +96,7 @@ root.addEventListener("input", (event) => {
 
 root.addEventListener("change", (event) => {
   const input = event.target as HTMLInputElement;
+  if (input.matches("[data-upload-files], [data-upload-folder]")) selectUploads(input);
   if (input.matches("[data-volume]")) void send({ kind: "set_volume", volume: Number(input.value) });
   if (input.matches("[data-seek]") && snapshot?.player.currentTrackId) {
     void send({
@@ -105,9 +106,6 @@ root.addEventListener("change", (event) => {
     });
   }
   if (input.matches("[data-stream-volume]")) audio.volume = Number(input.value) / 100;
-  if (input.matches("[data-upload-files], [data-upload-folder]")) {
-    selectUploads(input);
-  }
 });
 
 root.addEventListener("submit", (event) => {
@@ -342,6 +340,7 @@ async function uploadSelectedFiles(): Promise<void> {
   busy = true;
   errorMessage = "";
   importedFiles = [];
+  uploadProgress = "Starting secure transfer · waiting for laptop acknowledgement";
   render();
   try {
     const outcome = await bridge.uploadFiles(selectedFiles, (progress) => {
@@ -402,6 +401,7 @@ function render(): void {
   root.innerHTML = `<main class="companion-shell ${connected ? `is-connected is-${mode ?? "listen"}` : "is-landing"}" aria-busy="${busy}">
     <header class="companion-header"><div class="companion-brand"><span class="brand-mark">${icon("music")}</span><div><span class="wordmark">ZURADIO</span><h1>Web Companion</h1></div></div>${connected ? `<span class="connection-live">${capitalize(mode ?? "listen")}</span>` : ""}</header>
     ${connected ? `<section class="connection-panel connected-strip"><div class="connection-summary"><span class="broadcast-indicator active"></span><div><strong>${escapeHtml(connectionStatus)}</strong><span>Linked directly to the laptop</span></div></div>${renderModeSwitcher(mode ?? "listen")}<button data-action="disconnect" ${disabled()}>Disconnect</button></section>` : renderConnectionModes()}
+    ${connected && errorMessage ? `<p class="notice error" role="alert" data-testid="remote-error">${escapeHtml(errorMessage)}</p>` : ""}
     ${connected && mode !== "upload" ? `<section class="companion-player">
       <div class="companion-player-heading"><h2>Now playing</h2><span>${mode === "control" ? "Laptop output" : "Live stream"}</span></div>
       ${renderNowPlaying()}
@@ -416,8 +416,15 @@ function render(): void {
     ${dialogMode ? renderPasswordDialog(dialogMode) : ""}
     ${renamingPlaylistId ? renderRenamePlaylistDialog(renamingPlaylistId) : ""}
   </main>`;
+  bindUploadInputs();
   root.querySelector("[data-audio-mount]")?.append(audio);
   visualizer.mount(root.querySelector<SVGSVGElement>("[data-testid='companion-visualizer']"), bridge);
+}
+
+function bindUploadInputs(): void {
+  for (const input of root.querySelectorAll<HTMLInputElement>("[data-upload-files], [data-upload-folder]")) {
+    input.addEventListener("change", () => selectUploads(input));
+  }
 }
 
 function renderModeSwitcher(mode: RemoteMode): string {
@@ -540,7 +547,21 @@ function renderLibrary(state: AppSnapshot): string {
     (track) =>
       track.available &&
       (!query ||
-        [track.title, track.artist, track.album].some((value) => value.toLocaleLowerCase().includes(query))),
+        [
+          track.title,
+          track.artist,
+          track.album,
+          track.albumArtist,
+          track.format,
+          track.year?.toString() ?? "",
+          track.recognition.label ?? "",
+          track.recognition.title ?? "",
+          track.recognition.artist ?? "",
+          track.recognition.album ?? "",
+          track.recognition.genre ?? "",
+        ].some((value) =>
+          value.toLocaleLowerCase().includes(query),
+        )),
   );
   const selected = state.playlists.find((playlist) => playlist.id === selectedPlaylistId) ?? state.playlists[0];
   return `<div class="controller-view-header"><div><h2>Library</h2><span>${tracks.length} track${tracks.length === 1 ? "" : "s"}</span></div><label class="toolbar-search">${icon("library")}<input class="search" data-search type="search" value="${escapeAttribute(search)}" placeholder="Search library" aria-label="Search library" /></label></div>
@@ -548,7 +569,7 @@ function renderLibrary(state: AppSnapshot): string {
       .map(
         (track) => `<li class="track-row">
           <button class="track-cover-button" data-action="play-track" data-track-id="${escapeAttribute(track.id)}" aria-label="Play ${escapeAttribute(track.title)}"><span class="track-cover cover-placeholder tone-${coverTone(`${track.artist}-${track.album}`)}">${escapeHtml(coverInitials(track.album || track.title))}</span><span class="track-play-overlay">${icon("play")}</span></button>
-          <div class="track-title"><strong>${escapeHtml(track.title)}</strong><span>${escapeHtml(track.artist)}</span></div>
+          <div class="track-title"><strong>${escapeHtml(track.title)}</strong><span>${escapeHtml(track.artist)}</span>${renderRecognitionLabel(track)}</div>
           <div class="track-cell track-artist">${escapeHtml(track.artist)}</div>
           <div class="track-cell track-album">${escapeHtml(track.album)}</div>
           <div class="track-duration">${formatTime(track.durationMs)}</div>
@@ -560,6 +581,17 @@ function renderLibrary(state: AppSnapshot): string {
         </li>`,
       )
       .join("")}</ol>`;
+}
+
+function renderRecognitionLabel(track: Track): string {
+  const text = {
+    pending: "Shazam metadata · Identifying…",
+    recognized: `Shazam metadata · ${track.recognition.label ?? "Recognized"}${track.recognition.genre ? ` · ${track.recognition.genre}` : ""}`,
+    no_match: "Shazam metadata · No match",
+    unavailable: "Shazam metadata · Recognition helper unavailable",
+    error: "Shazam metadata · Retry on next scan",
+  }[track.recognition.status];
+  return `<span class="recognition-label status-${track.recognition.status}">${escapeHtml(text)}</span>`;
 }
 
 function renderQueue(state: AppSnapshot): string {
@@ -672,7 +704,14 @@ function selectUploads(input: HTMLInputElement): void {
   selectedFiles = files;
   importedFiles = [];
   uploadProgress = "";
-  render();
+  const selection = root.querySelector<HTMLElement>('[data-testid="upload-selection"]');
+  if (selection) {
+    selection.textContent = `${selectedFiles.length} file${selectedFiles.length === 1 ? "" : "s"} selected`;
+  }
+  const uploadButton = root.querySelector<HTMLButtonElement>('[data-action="upload"]');
+  if (uploadButton) uploadButton.disabled = busy;
+  root.querySelector(".upload-progress")?.remove();
+  root.querySelector(".imported-list")?.remove();
 }
 
 window.addEventListener("pagehide", () => {

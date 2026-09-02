@@ -1,6 +1,19 @@
 export type PlaybackStatus = "stopped" | "paused" | "playing" | "buffering" | "error";
 export type RepeatMode = "off" | "all" | "one";
 export type Role = "local" | "controller" | "listener";
+export type RecognitionStatus = "pending" | "recognized" | "no_match" | "unavailable" | "error";
+
+export interface TrackRecognition {
+  status: RecognitionStatus;
+  provider: string | null;
+  label: string | null;
+  title: string | null;
+  artist: string | null;
+  album: string | null;
+  genre: string | null;
+  externalId: string | null;
+  updatedAtMs: number | null;
+}
 
 export interface Track {
   id: string;
@@ -15,6 +28,7 @@ export interface Track {
   format: string;
   available: boolean;
   hasArtwork: boolean;
+  recognition: TrackRecognition;
 }
 
 export interface Playlist {

@@ -1,0 +1,18 @@
+[Unit]
+Description=Zuradio always-on desktop broadcaster
+Requires=zuradio.service
+After=zuradio.service graphical-session.target
+PartOf=zuradio.service
+StartLimitIntervalSec=0
+
+[Service]
+Type=simple
+Environment=ZURADIO_HOST_SUPERVISED=1
+ExecStart=%h/.local/bin/zuradio-desktop-launch
+Restart=always
+RestartSec=5
+TimeoutStopSec=10
+KillMode=control-group
+
+[Install]
+WantedBy=default.target

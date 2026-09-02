@@ -24,6 +24,7 @@ const companionBase = process.env.ZURADIO_COMPANION_BASE ?? "http://127.0.0.1:41
 const uploadFloorBps = Number(process.env.ZURADIO_UPLOAD_FLOOR_BPS ?? 32 * 1024);
 const downloadFloorBps = Number(process.env.ZURADIO_DOWNLOAD_FLOOR_BPS ?? 1_000_000);
 const firstCatalogueLimitMs = Number(process.env.ZURADIO_FIRST_CATALOGUE_LIMIT_MS ?? 90_000);
+const recognitionLimitMs = Number(process.env.ZURADIO_RECOGNITION_LIMIT_MS ?? 30_000);
 const audioExtensions = new Set([
   ".aac",
   ".aif",
@@ -61,6 +62,15 @@ test("passes the staged upload, immediate catalogue, organized storage, and down
     expect(hostTrackCount).toBe(before.tracks.filter((track) => track.available).length);
 
     const uploader = await browser.newPage();
+    await uploader.addInitScript(() => {
+      const labels: string[] = [];
+      Object.defineProperty(window, "__zuradioDataChannels", { value: labels });
+      const original = RTCPeerConnection.prototype.createDataChannel;
+      RTCPeerConnection.prototype.createDataChannel = function (label, options) {
+        labels.push(label);
+        return original.call(this, label, options);
+      };
+    });
     await uploader.goto(companionBase);
     await uploader.getByTestId("connect-upload").click();
     await uploader.getByTestId("password").fill(password);
@@ -76,6 +86,10 @@ test("passes the staged upload, immediate catalogue, organized storage, and down
     const localProgress = host.getByTestId("local-transfer-status");
     await expect(localProgress).toContainText("Receiving music from another computer", { timeout: 10_000 });
     await expect.poll(async () => (await progress.textContent()) ?? "", { timeout: 45_000 }).toMatch(/[1-9]\d*%/);
+    expect(
+      await uploader.evaluate(() => (window as unknown as { __zuradioDataChannels: string[] }).__zuradioDataChannels),
+      "audio bytes must use the dedicated binary data channel",
+    ).toContain("x-zuradio-upload-v1");
     await expect(localProgress).toContainText(/[1-9]\d*(?:\.\d)? (?:KiB|MiB) \/ /, { timeout: 45_000 });
     await expect(progress).toContainText("1 catalogued on laptop", { timeout: firstCatalogueLimitMs });
     const firstCatalogueMs = Math.round(performance.now() - uploadStarted);
@@ -95,7 +109,49 @@ test("passes the staged upload, immediate catalogue, organized storage, and down
     await expect
       .poll(async () => newAvailableTracks(beforeIds).then((tracks) => tracks.length), { timeout: 10_000 })
       .toBe(uploadPaths.length);
+    await expect
+      .poll(
+        async () =>
+          newAvailableTracks(beforeIds).then(
+            (tracks) => tracks.filter((track) => track.recognition.status === "recognized").length,
+          ),
+        { timeout: recognitionLimitMs },
+      )
+      .toBe(uploadPaths.length);
+    const recognitionMs = Math.round(performance.now() - uploadStarted);
+    expect(recognitionMs).toBeLessThan(recognitionLimitMs);
     const newTracks = await newAvailableTracks(beforeIds);
+    for (const track of newTracks) {
+      expect(track.recognition.label).toBe("Zuradio Test Artist — Verified Acoustic Match");
+      expect(track.recognition.title).toBe("Verified Acoustic Match");
+      expect(track.recognition.artist).toBe("Zuradio Test Artist");
+      expect(track.recognition.album).toBe("Acoustic Verification Collection");
+      expect(track.recognition.genre).toBe("Verification Electronica");
+      await expect(host.getByTestId(`recognition-${track.id}`)).toContainText(
+        "Shazam metadata · Zuradio Test Artist — Verified Acoustic Match · Verification Electronica",
+      );
+    }
+    const recognizedSnapshot = await daemonSnapshot();
+    const genreMatches = recognizedSnapshot.tracks.filter(
+      (track) => track.available && track.recognition.genre === "Verification Electronica",
+    ).length;
+    expect(genreMatches).toBeGreaterThanOrEqual(newTracks.length);
+    await host.getByTestId("search").fill("Verification Electronica");
+    await expect(host.locator("[data-track-row]"), "local search must use the parallel Shazam genre").toHaveCount(genreMatches);
+    await host.getByTestId("search").fill("");
+
+    const controller = await browser.newPage();
+    await controller.goto(companionBase);
+    await controller.getByTestId("connect-control").click();
+    await controller.getByTestId("password").fill(password);
+    await controller.getByTestId("connect").click();
+    await expect(controller.getByText("Controller connected", { exact: true })).toBeVisible({ timeout: 45_000 });
+    await controller.getByRole("searchbox", { name: "Search library" }).fill("Acoustic Verification Collection");
+    const albumMatches = recognizedSnapshot.tracks.filter(
+      (track) => track.available && track.recognition.album === "Acoustic Verification Collection",
+    ).length;
+    await expect(controller.locator(".music-track-list .track-row"), "remote search must use the parallel Shazam album").toHaveCount(albumMatches);
+    await controller.close();
 
     const downloadStarted = performance.now();
     let downloadedBytes = 0;
@@ -133,6 +189,7 @@ test("passes the staged upload, immediate catalogue, organized storage, and down
       sourceFiles: uploadPaths.length,
       sourceBytes,
       firstCatalogueMs,
+      recognitionMs,
       uploadMs,
       uploadBytesPerSecond,
       downloadedBytes,

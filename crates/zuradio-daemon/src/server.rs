@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::future::Future;
 use std::io::Write;
@@ -31,7 +31,7 @@ use sha2::Sha256;
 use subtle::ConstantTimeEq;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::net::TcpListener;
-use tokio::sync::{broadcast, oneshot};
+use tokio::sync::{Semaphore, broadcast, mpsc, oneshot};
 use tokio_util::io::ReaderStream;
 use tower_http::services::ServeDir;
 use uuid::Uuid;
@@ -40,9 +40,10 @@ use zuradio_core::{
 };
 
 use crate::client::RuntimeFile;
+use crate::recognition::recognize_file;
 use crate::upload::{UploadError, UploadManager, UploadOperation, UploadOutcome};
 
-const MAX_BODY_BYTES: usize = 32 * 1024;
+const MAX_BODY_BYTES: usize = 128 * 1024;
 const GRANT_TTL: Duration = Duration::from_hours(8);
 const TRUST_TTL: Duration = Duration::from_hours(24);
 const PASSWORD_ITERATIONS: u32 = 210_000;
@@ -74,6 +75,14 @@ struct AppState {
     uploads: Arc<Mutex<UploadManager>>,
     library_root: Arc<PathBuf>,
     events: broadcast::Sender<AppSnapshot>,
+    recognition_jobs: mpsc::Sender<RecognitionJob>,
+    recognition_pending: Arc<Mutex<HashSet<String>>>,
+}
+
+#[derive(Debug, Clone)]
+struct RecognitionJob {
+    track_id: String,
+    path: PathBuf,
 }
 
 #[derive(Clone, Serialize)]
@@ -283,11 +292,12 @@ where
         .map(|password| load_device_trust_key(&options.data_dir, password))
         .transpose()?;
     let database_path = options.data_dir.join("zuradio.db");
-    let core = ZuradioCore::open(&database_path).context("opening Zuradio catalog")?;
+    let (core, initial_recognition_candidates) = open_core(&database_path)?;
     let launch_token = random_secret();
     let cli_token = random_secret();
     let session_token = random_secret();
     let (events, _) = broadcast::channel(64);
+    let (recognition_jobs, recognition_receiver) = mpsc::channel(256);
     let state = AppState {
         core: Arc::new(Mutex::new(core)),
         launch_token: Arc::from(launch_token.clone()),
@@ -301,7 +311,11 @@ where
         uploads: Arc::new(Mutex::new(uploads)),
         library_root: Arc::new(library_root.clone()),
         events,
+        recognition_jobs,
+        recognition_pending: Arc::new(Mutex::new(HashSet::new())),
     };
+    tokio::spawn(run_recognition_queue(state.clone(), recognition_receiver));
+    queue_recognitions(&state, initial_recognition_candidates);
     tracing::info!(library = %library_root.display(), "Zuradio music library ready");
 
     let web_root = options
@@ -359,6 +373,14 @@ where
         .await?;
     let _ = fs::remove_file(shutdown_data_dir.join("runtime.json"));
     Ok(())
+}
+
+fn open_core(database_path: &Path) -> anyhow::Result<(ZuradioCore, Vec<(String, PathBuf)>)> {
+    let core = ZuradioCore::open(database_path).context("opening Zuradio catalog")?;
+    let candidates = core
+        .recognition_candidates(false)
+        .context("loading pending acoustic recognition jobs")?;
+    Ok((core, candidates))
 }
 
 async fn health() -> Json<serde_json::Value> {
@@ -439,7 +461,11 @@ async fn scan(
     let core_state = Arc::clone(&state.core);
     let scan_result = tokio::task::spawn_blocking(move || {
         let mut core = core_state.lock().map_err(|_| BlockingScanError::Lock)?;
-        core.scan(&roots).map_err(BlockingScanError::Core)
+        let snapshot = core.scan(&roots).map_err(BlockingScanError::Core)?;
+        let candidates = core
+            .recognition_candidates(true)
+            .map_err(BlockingScanError::Core)?;
+        Ok::<_, BlockingScanError>((snapshot, candidates))
     })
     .await
     .map_err(|_| {
@@ -450,8 +476,8 @@ async fn scan(
             None,
         )
     })?;
-    let new_snapshot = match scan_result {
-        Ok(snapshot) => snapshot,
+    let (new_snapshot, candidates) = match scan_result {
+        Ok(result) => result,
         Err(BlockingScanError::Core(error)) => return Err(map_core_error(&error)),
         Err(BlockingScanError::Lock) => {
             return Err(wire_error(
@@ -463,7 +489,89 @@ async fn scan(
         }
     };
     let _ = state.events.send(new_snapshot.clone());
+    queue_recognitions(&state, candidates);
     Ok(Json(new_snapshot))
+}
+
+fn queue_recognitions(state: &AppState, candidates: Vec<(String, PathBuf)>) {
+    let queued = {
+        let Ok(mut pending) = state.recognition_pending.lock() else {
+            tracing::warn!("recognition queue lock failed");
+            return;
+        };
+        candidates
+            .into_iter()
+            .filter_map(|(track_id, path)| {
+                pending
+                    .insert(track_id.clone())
+                    .then_some(RecognitionJob { track_id, path })
+            })
+            .collect::<Vec<_>>()
+    };
+    if queued.is_empty() {
+        return;
+    }
+    let sender = state.recognition_jobs.clone();
+    let pending = Arc::clone(&state.recognition_pending);
+    tokio::spawn(async move {
+        let mut remaining = queued.into_iter();
+        while let Some(job) = remaining.next() {
+            let track_id = job.track_id.clone();
+            if sender.send(job).await.is_err() {
+                if let Ok(mut pending) = pending.lock() {
+                    pending.remove(&track_id);
+                    for unsent in remaining {
+                        pending.remove(&unsent.track_id);
+                    }
+                }
+                break;
+            }
+        }
+    });
+}
+
+async fn run_recognition_queue(state: AppState, mut receiver: mpsc::Receiver<RecognitionJob>) {
+    let concurrency = Arc::new(Semaphore::new(2));
+    while let Some(job) = receiver.recv().await {
+        let Ok(permit) = Arc::clone(&concurrency).acquire_owned().await else {
+            break;
+        };
+        let worker_state = state.clone();
+        tokio::spawn(async move {
+            let recognition = recognize_file(&job.path).await;
+            let recognition_status = recognition.status;
+            let core_state = Arc::clone(&worker_state.core);
+            let track_id = job.track_id.clone();
+            let update = tokio::task::spawn_blocking(move || {
+                core_state
+                    .lock()
+                    .map_err(|_| BlockingScanError::Lock)?
+                    .set_track_recognition(&track_id, &recognition)
+                    .map_err(BlockingScanError::Core)
+            })
+            .await;
+            match update {
+                Ok(Ok(snapshot)) => {
+                    let _ = worker_state.events.send(snapshot);
+                    tracing::info!(
+                        track_id = %job.track_id,
+                        status = ?recognition_status,
+                        "acoustic recognition updated"
+                    );
+                }
+                Ok(Err(BlockingScanError::Core(CoreError::NotFound(_)))) => {
+                    tracing::debug!(track_id = %job.track_id, "recognition target disappeared");
+                }
+                Ok(Err(_)) | Err(_) => {
+                    tracing::warn!(track_id = %job.track_id, "recognition update failed");
+                }
+            }
+            if let Ok(mut pending) = worker_state.recognition_pending.lock() {
+                pending.remove(&job.track_id);
+            }
+            drop(permit);
+        });
+    }
 }
 
 async fn events_socket(
@@ -861,37 +969,31 @@ async fn remote_upload(
         remote.sequence,
         RemoteMode::Upload,
     )?;
-    let uploads = Arc::clone(&state.uploads);
-    let operation = remote.operation;
-    let outcome = tokio::task::spawn_blocking(move || {
-        uploads
-            .lock()
-            .map_err(|_| UploadError::Storage)?
-            .execute(operation)
-    })
-    .await
-    .map_err(|_| upload_worker_error())?
-    .map_err(|error| map_upload_error(&error))?;
+    let outcome = execute_upload_operation(&state, remote.operation).await?;
 
     let catalogued_path = outcome.catalogued_path.clone();
     let snapshot = if let Some(path) = catalogued_path {
         let core_state = Arc::clone(&state.core);
         let library_root = Arc::clone(&state.library_root);
         let scanned = tokio::task::spawn_blocking(move || {
-            core_state
-                .lock()
-                .map_err(|_| BlockingScanError::Lock)?
+            let mut core = core_state.lock().map_err(|_| BlockingScanError::Lock)?;
+            let snapshot = core
                 .catalog_file(&path, &library_root)
-                .map_err(BlockingScanError::Core)
+                .map_err(BlockingScanError::Core)?;
+            let candidates = core
+                .recognition_candidates(false)
+                .map_err(BlockingScanError::Core)?;
+            Ok::<_, BlockingScanError>((snapshot, candidates))
         })
         .await
         .map_err(|_| upload_worker_error())?;
-        let snapshot = match scanned {
+        let (snapshot, candidates) = match scanned {
             Ok(value) => value,
             Err(BlockingScanError::Core(error)) => return Err(map_core_error(&error)),
             Err(BlockingScanError::Lock) => return Err(upload_worker_error()),
         };
         let _ = state.events.send(snapshot.clone());
+        queue_recognitions(&state, candidates);
         if let Some(imported) = outcome.imported.first() {
             tracing::info!(
                 transfer_id = %outcome.transfer_id,
@@ -914,6 +1016,84 @@ async fn remote_upload(
         None
     };
     Ok(Json(RemoteUploadResponse { outcome, snapshot }))
+}
+
+async fn execute_upload_operation(
+    state: &AppState,
+    operation: UploadOperation,
+) -> ApiResult<UploadOutcome> {
+    let uploads = Arc::clone(&state.uploads);
+    let (operation_kind, transfer_id, file_id, offset, encoded_bytes) = match &operation {
+        UploadOperation::Begin { transfer_id, .. } => {
+            ("begin", transfer_id.clone(), None, None, None)
+        }
+        UploadOperation::Chunk {
+            transfer_id,
+            file_id,
+            offset,
+            data,
+        } => (
+            "chunk",
+            transfer_id.clone(),
+            Some(file_id.clone()),
+            Some(*offset),
+            Some(data.len()),
+        ),
+        UploadOperation::FinishFile {
+            transfer_id,
+            file_id,
+            ..
+        } => (
+            "finish_file",
+            transfer_id.clone(),
+            Some(file_id.clone()),
+            None,
+            None,
+        ),
+        UploadOperation::Commit { transfer_id } => {
+            ("commit", transfer_id.clone(), None, None, None)
+        }
+        UploadOperation::Abort { transfer_id } => ("abort", transfer_id.clone(), None, None, None),
+    };
+    let outcome_result = tokio::task::spawn_blocking(move || {
+        uploads
+            .lock()
+            .map_err(|_| UploadError::Storage)?
+            .execute(operation)
+    })
+    .await
+    .map_err(|_| upload_worker_error())?;
+    let outcome = match outcome_result {
+        Ok(outcome) => outcome,
+        Err(error) => {
+            tracing::warn!(
+                transfer_id = %transfer_id,
+                operation = operation_kind,
+                file_id = file_id.as_deref().unwrap_or(""),
+                offset = offset.unwrap_or(0),
+                encoded_bytes = encoded_bytes.unwrap_or(0),
+                reason = %error,
+                "remote upload operation rejected"
+            );
+            return Err(map_upload_error(&error));
+        }
+    };
+    if operation_kind == "chunk" && offset == Some(0) {
+        tracing::info!(
+            transfer_id = %transfer_id,
+            file_id = file_id.as_deref().unwrap_or(""),
+            received = outcome.received.unwrap_or(0),
+            "first remote upload chunk accepted"
+        );
+    } else if operation_kind == "chunk" {
+        tracing::debug!(
+            transfer_id = %transfer_id,
+            file_id = file_id.as_deref().unwrap_or(""),
+            received = outcome.received.unwrap_or(0),
+            "remote upload chunk accepted"
+        );
+    }
+    Ok(outcome)
 }
 
 async fn validate_host(request: Request, next: Next) -> Response {

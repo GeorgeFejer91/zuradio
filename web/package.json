@@ -11,6 +11,9 @@
     "test": "vitest run",
     "test:ui": "playwright test",
     "test:transfer": "ZURADIO_TRANSFER_GATE=1 playwright test tests/e2e/data-transfer.spec.ts --project=chromium",
+    "benchmark:vdo-binary": "node scripts/benchmark-vdo-binary.mjs",
+    "benchmark:webrtc": "node scripts/benchmark-webrtc-data-plane.mjs",
+    "benchmark:webtransport": "../scripts/benchmark-webtransport.sh",
     "upload": "node scripts/upload-cli.mjs",
     "preview": "vite preview"
   },

@@ -9,4 +9,13 @@ package and notices remain independently identifiable in the web bundle and
 source tree. VDO.Ninja is an optional transport adapter, not part of Zuradio's
 authorization boundary.
 
+The Linux installer obtains the official Rust
+[SongRec](https://github.com/marin-m/songrec) 0.7.5 package from its maintainer's
+PPA, verifies the pinned package SHA-256, and installs its executable, copyright
+notice, and exact source revision under `~/.local/lib/zuradio/songrec/`. SongRec
+is GPL-3.0-or-later. It remains a separately licensed process: no SongRec code is
+copied, linked, or loaded into the MIT Zuradio daemon, which communicates only
+through a bounded command-line JSON interface. Redistributors must retain the
+installed SongRec notices and satisfy its GPL source/license obligations.
+
 Dependency-specific license inventory should be generated before any release.

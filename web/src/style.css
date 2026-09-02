@@ -285,6 +285,19 @@ h3 {
   font-size: 12px;
 }
 
+.track-title .recognition-label {
+  display: block;
+  overflow: hidden;
+  margin-top: 1px;
+  color: #77756f;
+  font-size: 11px;
+  text-overflow: ellipsis;
+}
+
+.track-title .recognition-label.status-recognized {
+  color: #b8b5ab;
+}
+
 .track-duration,
 .time {
   color: var(--muted);

@@ -8,6 +8,7 @@ const passwordPath = process.env.ZURADIO_TEST_PASSWORD_FILE;
 const expectedTracks = Number(process.env.ZURADIO_EXPECTED_TRACKS ?? "3");
 const maxConnectMs = 15_000;
 const maxCommandMs = 2_000;
+const maxBeaconRecoveryMs = 15_000;
 
 if (!passwordPath) throw new Error("ZURADIO_TEST_PASSWORD_FILE must name the installed password file");
 const password = fs.readFileSync(passwordPath, "utf8").replace(/[\r\n]+$/, "");
@@ -22,15 +23,50 @@ if (!host) throw new Error("The inspected Zuradio desktop page is unavailable");
 const hostState = await host.evaluate(async () => ({
   hasWebRtc: typeof RTCPeerConnection === "function",
   audioState: new AudioContext().state,
-  broadcastActive: Boolean(await (await fetch("/api/v1/broadcast")).json()),
-  trackCount: (await (await fetch("/api/v1/snapshot")).json()).tracks.filter((track) => track.available).length,
+  broadcast: await (await fetch("/api/v1/broadcast")).json(),
+  snapshot: await (await fetch("/api/v1/snapshot")).json(),
 }));
 if (!hostState.hasWebRtc) throw new Error("The installed desktop shell has no WebRTC engine");
 if (hostState.audioState !== "running") throw new Error("The installed desktop audio graph is autoplay-blocked");
-if (!hostState.broadcastActive) throw new Error("The installed app did not broadcast automatically");
-if (hostState.trackCount !== expectedTracks) {
-  throw new Error(`Expected ${expectedTracks} installed tracks, found ${hostState.trackCount}`);
+if (!hostState.broadcast) throw new Error("The installed app did not broadcast automatically");
+const trackCount = hostState.snapshot.tracks.filter((track) => track.available).length;
+if (trackCount !== expectedTracks) {
+  throw new Error(`Expected ${expectedTracks} installed tracks, found ${trackCount}`);
 }
+
+const beaconStarted = performance.now();
+await host.evaluate(async () => {
+  const response = await fetch("/api/v1/broadcast/stop", { method: "POST" });
+  if (!response.ok) throw new Error("Could not force the installed beacon recovery path");
+});
+await host.waitForFunction(
+  async ({ sessionId, epoch, playerStatus, currentTrackId }) => {
+    const [broadcast, snapshot] = await Promise.all([
+      fetch("/api/v1/broadcast", { cache: "no-store" }).then((response) => response.json()),
+      fetch("/api/v1/snapshot", { cache: "no-store" }).then((response) => response.json()),
+    ]);
+    return Boolean(
+      broadcast &&
+      broadcast.sessionId !== sessionId &&
+      broadcast.epoch !== epoch &&
+      snapshot.player.status === playerStatus &&
+      snapshot.player.currentTrackId === currentTrackId &&
+      document.querySelector('[data-testid="restart-broadcast"]') &&
+      [...document.querySelectorAll(".broadcast-status strong")].some(
+        (element) => element.textContent === "Discoverable",
+      ),
+    );
+  },
+  {
+    sessionId: hostState.broadcast.sessionId,
+    epoch: hostState.broadcast.epoch,
+    playerStatus: hostState.snapshot.player.status,
+    currentTrackId: hostState.snapshot.player.currentTrackId,
+  },
+  { timeout: maxBeaconRecoveryMs },
+);
+const beaconRecoveryMs = Math.round(performance.now() - beaconStarted);
+assertBelow("automatic beacon recovery", beaconRecoveryMs, maxBeaconRecoveryMs);
 
 const browser = await chromium.launch({
   headless: true,
@@ -160,6 +196,7 @@ try {
     commandRttMs,
     trustedConnectMs,
     trustedCommandRttMs,
+    beaconRecoveryMs,
     trackCount: expectedTracks,
     streamTrackReceived: true,
   }, null, 2)}\n`);
