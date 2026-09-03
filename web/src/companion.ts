@@ -41,6 +41,7 @@ let playlistPickerOpen = false;
 let playlistSearch = "";
 let renamingPlaylistId: string | null = null;
 let commandTail: Promise<void> = Promise.resolve();
+let connectionTransition = false;
 
 history.replaceState(null, "", `${location.pathname}${location.search}`);
 
@@ -62,6 +63,7 @@ const bridge = new CompanionBridge(audio, {
     render();
   },
   onStatus(value) {
+    if (connectionTransition && isReadyConnectionStatus(value)) return;
     connectionStatus = value;
     render();
   },
@@ -297,11 +299,13 @@ async function handleClick(target: HTMLElement): Promise<void> {
 async function connect(mode: RemoteMode, password: string): Promise<void> {
   errorMessage = "";
   busy = true;
+  connectionTransition = true;
   selectedMode = mode;
   render();
   try {
     await bridge.connect(mode, password);
     connected = true;
+    connectionStatus = readyConnectionStatus(mode);
     errorMessage = "";
     dialogMode = null;
   } catch (error) {
@@ -309,6 +313,7 @@ async function connect(mode: RemoteMode, password: string): Promise<void> {
     connected = false;
     dialogMode = mode;
   } finally {
+    connectionTransition = false;
     busy = false;
     render();
   }
@@ -317,6 +322,7 @@ async function connect(mode: RemoteMode, password: string): Promise<void> {
 async function connectTrusted(mode: RemoteMode, switching = false): Promise<void> {
   errorMessage = "";
   busy = true;
+  connectionTransition = true;
   selectedMode = mode;
   dialogMode = null;
   if (switching) connectionStatus = `Switching to ${capitalize(mode)}…`;
@@ -324,11 +330,13 @@ async function connectTrusted(mode: RemoteMode, switching = false): Promise<void
   try {
     await bridge.connectTrusted(mode);
     connected = true;
+    connectionStatus = readyConnectionStatus(mode);
   } catch {
     errorMessage = "Trusted access expired. Enter the Zuradio password again.";
     connected = false;
     dialogMode = mode;
   } finally {
+    connectionTransition = false;
     busy = false;
     render();
     if (dialogMode) root.querySelector<HTMLInputElement>("[data-password]")?.focus();
@@ -658,6 +666,14 @@ function numeric(value: string | undefined): number | null {
 
 function disabled(): string {
   return busy ? "disabled" : "";
+}
+
+function readyConnectionStatus(mode: RemoteMode): string {
+  return mode === "control" ? "Controller connected" : mode === "upload" ? "Upload connected" : "Listening live";
+}
+
+function isReadyConnectionStatus(value: string): boolean {
+  return value === "Controller connected" || value === "Upload connected" || value === "Listening live";
 }
 
 function formatTime(milliseconds: number): string {

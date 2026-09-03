@@ -125,6 +125,7 @@ test("streams from the laptop while enforcing listener and controller roles", as
     const switchToUploadStarted = Date.now();
     await controller.getByTestId("switch-upload").click();
     await expect(controller.getByText("Upload connected", { exact: true })).toBeVisible({ timeout: 20_000 });
+    await expect(controller.locator("main")).toHaveAttribute("aria-busy", "false");
     const switchToUploadMs = Date.now() - switchToUploadStarted;
     expect(switchToUploadMs, "control-to-upload switch latency").toBeLessThan(MAX_CONNECT_LATENCY_MS);
     await expect(controller.getByTestId("switch-upload")).toHaveAttribute("aria-current", "page");
@@ -135,6 +136,7 @@ test("streams from the laptop while enforcing listener and controller roles", as
     const switchToControlStarted = Date.now();
     await controller.getByTestId("switch-control").click();
     await expect(controller.getByText("Controller connected", { exact: true })).toBeVisible({ timeout: 20_000 });
+    await expect(controller.locator("main")).toHaveAttribute("aria-busy", "false");
     const switchToControlMs = Date.now() - switchToControlStarted;
     expect(switchToControlMs, "upload-to-control switch latency").toBeLessThan(MAX_CONNECT_LATENCY_MS);
     await expect(controller.getByTestId("switch-control")).toHaveAttribute("aria-current", "page");
