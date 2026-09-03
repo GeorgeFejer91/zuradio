@@ -49,8 +49,11 @@ ordered binary WebRTC channel, where negotiated SCTP message limits and
 `bufferedAmount` backpressure apply. An older host can still receive the
 bounded JSON/base64 path during a rolling upgrade.
 
-1. `begin` declares a random transfer ID and every file's random ID, relative
-   path, and byte size.
+1. `begin` declares a random transaction ID and every file's random ID, relative
+   path, and byte size. Before acknowledging the declaration, the Rust receiver
+   verifies the visible managed-library root by creating, writing, flushing,
+   syncing, and removing a private probe. Storage faults therefore reject the
+   upload before the browser sends song bytes.
 2. `chunk` carries an exact expected offset. The direct binary path carries at
    most 64 KiB of raw audio per frame; the compatibility path carries at most
    8 KiB as base64. The host binds binary frame metadata to the authenticated
@@ -58,14 +61,29 @@ bounded JSON/base64 path during a rolling upgrade.
 3. `finish_file` supplies the browser's SHA-256 digest; Rust compares it with
    the staged file.
 4. `finish_file` also parses, classifies, moves, incrementally catalogs, and
-   publishes that verified file immediately. This per-file commit means a later
-   failure does not hide or discard songs that already finished.
+   publishes that verified file immediately. A failed destination commit leaves
+   the verified staged file retryable in the same transaction. Same-filesystem
+   rename is preferred; a cross-filesystem destination uses a flushed and synced
+   temporary copy followed by an atomic rename. This per-file commit means a
+   later failure does not hide or discard songs that already finished.
 5. `commit` confirms that every declared file completed and returns the full
    imported-file summary.
 6. `abort` removes only incomplete private staging data; already catalogued
    originals remain in the library.
 
-The daemon accepts at most 512 files, 512 MiB per file, and 16 GiB per batch.
+The daemon accepts at most 512 files, 512 MiB per file, and 16 GiB per
+transaction. The browser may select a larger collection: it preserves order and
+automatically partitions the selection by all three receiver constraints—file
+count, aggregate bytes, and the 16 KiB authenticated WebRTC control-message
+ceiling. Each transaction commits independently, while remote progress and the
+final imported count cover the original selection. A long-running upload renews
+its eight-hour live grant between transactions through the existing 24-hour
+trusted-device proof when necessary; it never stores or reuses the raw password.
+New companions advertise `compact-v1` upload responses and accumulate each
+bounded per-file metadata result locally. The host then omits full catalogue
+snapshots and the repeated commit summary from the WebRTC acknowledgement, so
+reply size does not grow with the laptop library. A companion without that
+advertisement receives the original response shape during rolling upgrades.
 It rejects zero-byte files, special/path-traversal components, duplicate IDs,
 unordered offsets, oversized messages, unsupported extensions, digest
 mismatches, stale sequences, wrong peers, and wrong-mode grants.
@@ -87,7 +105,10 @@ Zuradio Library/<album artist>/<album (year)>/<track - title [digest]>.extension
 ```
 
 The digest suffix avoids accidental overwrites and is hidden from fallback
-display titles. Metadata precedence is:
+display titles. Generated components are capped by UTF-8 bytes and normalized
+away from control/separator characters, trailing spaces or dots, and reserved
+Windows device names, so the same organized library is portable across Linux
+and Windows. Metadata precedence is:
 
 1. user edits saved in the catalog override table;
 2. embedded tags read with Lofty;
@@ -116,6 +137,13 @@ search retrieval through those fields, use of the dedicated binary channel,
 and throughput floors. A separate forced first-chunk rejection proves that the
 CLI reports the receiver error and last acknowledged stage instead of waiting
 only for the final import message.
+
+The standalone browser CLI separates its short page/connection timeout from an
+eight-hour whole-upload timeout, configurable with `--upload-timeout-ms` up to
+24 hours. Completed transactions are durable checkpoints: if a later one fails,
+the error reports how many earlier tracks were catalogued, and retrying the same
+selection reuses digest-qualified managed destinations instead of overwriting
+them.
 
 ## Password file
 

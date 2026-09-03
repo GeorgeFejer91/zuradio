@@ -151,7 +151,9 @@ gesture under their autoplay policy.
 
 Authorized Upload mode accepts individual files or a browser-selected folder.
 Files are transferred sequentially over the encrypted live data bridge and
-checked with SHA-256. Each completed file is moved immediately into
+checked with SHA-256. Before any music bytes are sent, the receiver durably
+probes the visible managed-library root and reports a precise storage stage if it
+is unavailable. Each completed file is moved immediately into
 `Zuradio Library` inside the computer's Music folder, catalogued incrementally,
 and pushed into every open library view without waiting for the rest of the
 selection. A bounded background recognition queue starts for that song only
@@ -159,7 +161,13 @@ after publication, with at most two recognizers running at once, so an offline
 or slow provider cannot hold up the catalog or transfer. While this happens, the local app shows the current incoming file,
 acknowledged bytes and percentage, and how many tracks are already catalogued;
 it then reports completion or interruption. Private partial files remain under
-Zuradio app data. Upload limits are 512 files, 512 MiB per file, and 16 GiB per selection. See
+Zuradio app data. A verified file remains retryable if its destination commit
+fails, and cross-drive/library mounts use a synced atomic-copy fallback. Upload
+receiver transactions are limited to 512 files, 512 MiB per file, 16 GiB, and a
+bounded control declaration. Larger browser selections—including multi-thousand
+file libraries—are split into independently committed transactions while the
+uploader keeps one global file/catalogue count. Compact acknowledgements keep
+the remote reply independent of the total library size. See
 [the upload protocol](docs/upload-protocol.md).
 
 Automatic acoustic metadata uses the official Rust
@@ -191,7 +199,10 @@ with `--url`, and can use an installed Chrome or Brave binary with
 source byte count, connection time, upload duration, and transfer rate, so
 automation can verify the result. The browser remains only a secure transport
 client; files still travel directly to the active laptop and are never stored
-by GitHub Pages.
+by GitHub Pages. Its default whole-upload timeout is eight hours; use
+`--upload-timeout-ms` for a different 10-second-to-24-hour window. For a large
+folder, each bounded transaction is a durable checkpoint and a later failure
+reports how many earlier tracks are already safely catalogued.
 
 ## Broadcast to a phone
 

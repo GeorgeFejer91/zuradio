@@ -1,7 +1,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fs::{self, OpenOptions};
 use std::future::Future;
-use std::io::Write;
+use std::io::{self, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr};
 use std::num::NonZeroU32;
 use std::path::{Path, PathBuf};
@@ -1058,7 +1058,12 @@ async fn execute_upload_operation(
     let outcome_result = tokio::task::spawn_blocking(move || {
         uploads
             .lock()
-            .map_err(|_| UploadError::Storage)?
+            .map_err(|_| {
+                UploadError::storage(
+                    "locking the upload transaction",
+                    io::Error::other("upload transaction state is unavailable"),
+                )
+            })?
             .execute(operation)
     })
     .await
@@ -1297,7 +1302,7 @@ fn map_upload_error(error: &UploadError) -> (StatusCode, Json<WireError>) {
         UploadError::Integrity | UploadError::Media => {
             (StatusCode::UNPROCESSABLE_ENTITY, ErrorCode::Media)
         }
-        UploadError::Storage => (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Storage),
+        UploadError::Storage { .. } => (StatusCode::INTERNAL_SERVER_ERROR, ErrorCode::Storage),
     };
     wire_error(status, code, &error.to_string(), None)
 }

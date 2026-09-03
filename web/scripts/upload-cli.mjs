@@ -78,10 +78,10 @@ async function upload(options) {
     const completion = page.getByTestId("upload-progress").filter({ hasText: /tracks? added to the laptop library/i });
     try {
       await Promise.race([
-        completion.waitFor({ timeout: options.timeoutMs }),
+        completion.waitFor({ timeout: options.uploadTimeoutMs }),
         page
           .getByRole("alert")
-          .waitFor({ state: "visible", timeout: options.timeoutMs })
+          .waitFor({ state: "visible", timeout: options.uploadTimeoutMs })
           .then(() => Promise.reject(new Error("the receiving laptop reported an upload error"))),
       ]);
     } catch (error) {
@@ -123,7 +123,10 @@ async function selectUploadFiles(page, target, expectedCount) {
       target.kind === "folder" ? page.locator("[data-upload-folder]") : page.locator("[data-upload-files]");
     await picker.setInputFiles(target.kind === "folder" ? target.path : target.paths);
     try {
-      await page.getByTestId("upload-selection").filter({ hasText: expectedText }).waitFor({ timeout: 5_000 });
+      const selectionTimeoutMs = Math.min(120_000, 5_000 + expectedCount * 10);
+      await page.getByTestId("upload-selection").filter({ hasText: expectedText }).waitFor({
+        timeout: selectionTimeoutMs,
+      });
       return;
     } catch (error) {
       if (attempt === 2) throw error;
@@ -139,6 +142,7 @@ function parseArguments(argumentsList) {
     url: process.env.ZURADIO_URL ?? DEFAULT_URL,
     browserExecutable: process.env.ZURADIO_BROWSER_EXECUTABLE || undefined,
     timeoutMs: 180_000,
+    uploadTimeoutMs: 8 * 60 * 60 * 1_000,
     headed: false,
     help: false,
   };
@@ -160,6 +164,8 @@ function parseArguments(argumentsList) {
       options.browserExecutable = readValue(argumentsList, ++index, argument);
     } else if (argument === "--timeout-ms") {
       options.timeoutMs = Number(readValue(argumentsList, ++index, argument));
+    } else if (argument === "--upload-timeout-ms") {
+      options.uploadTimeoutMs = Number(readValue(argumentsList, ++index, argument));
     } else {
       throw new Error(`unknown argument: ${argument}`);
     }
@@ -170,6 +176,13 @@ function parseArguments(argumentsList) {
   if (options.files.length > 0 && options.folder) throw new Error("use --file or --folder, not both in one upload");
   if (!Number.isSafeInteger(options.timeoutMs) || options.timeoutMs < 10_000 || options.timeoutMs > 900_000) {
     throw new Error("--timeout-ms must be an integer between 10000 and 900000");
+  }
+  if (
+    !Number.isSafeInteger(options.uploadTimeoutMs) ||
+    options.uploadTimeoutMs < 10_000 ||
+    options.uploadTimeoutMs > 86_400_000
+  ) {
+    throw new Error("--upload-timeout-ms must be an integer between 10000 and 86400000");
   }
   return options;
 }
@@ -246,7 +259,8 @@ Options:
   --url URL                 Companion URL (defaults to the public Zuradio site)
   --browser-executable PATH Use a specific Chrome, Brave, or Chromium executable
   --headed                  Show the automation browser while uploading
-  --timeout-ms NUMBER       Connection/upload timeout (default: 180000)
+  --timeout-ms NUMBER       Page and connection timeout (default: 180000)
+  --upload-timeout-ms N     Whole-upload timeout (default: 28800000; max: 86400000)
 
 The password is read only from a file, never from a command-line value. On
 success the command prints machine-readable JSON. Music travels directly to

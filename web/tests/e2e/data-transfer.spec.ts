@@ -54,6 +54,9 @@ test("passes the staged upload, immediate catalogue, organized storage, and down
   const before = await daemonSnapshot();
   const beforeIds = new Set(before.tracks.map((track) => track.id));
   const host = await authenticatedHost(browser);
+  const isolatedLibrary = libraryRoot as string;
+  const libraryBackup = `${isolatedLibrary}.preflight-${process.pid}-${Date.now()}`;
+  let libraryIsBlocked = false;
 
   try {
     await startFreshBroadcast(host);
@@ -80,10 +83,26 @@ test("passes the staged upload, immediate catalogue, organized storage, and down
     await uploader.locator("[data-upload-files]").setInputFiles(uploadPaths);
     await expect(uploader.getByTestId("upload-selection")).toHaveText("2 files selected");
 
-    const uploadStarted = performance.now();
-    await uploader.getByTestId("upload").click();
+    fs.renameSync(isolatedLibrary, libraryBackup);
+    fs.writeFileSync(isolatedLibrary, "temporary storage-gate blocker");
+    libraryIsBlocked = true;
     const progress = uploader.getByTestId("upload-progress");
     const localProgress = host.getByTestId("local-transfer-status");
+    try {
+      await uploader.getByTestId("upload").click();
+      await expect(uploader.getByRole("alert")).toContainText(
+        /upload storage is unavailable while (preparing|verifying) the managed library/i,
+      );
+      await expect(progress).toHaveText("Starting secure transfer · waiting for laptop acknowledgement");
+      await expect(localProgress).toContainText("Transfer interrupted");
+      await expect(localProgress).toContainText(/upload storage is unavailable while/i);
+    } finally {
+      restoreBlockedLibrary(isolatedLibrary, libraryBackup);
+      libraryIsBlocked = false;
+    }
+
+    const uploadStarted = performance.now();
+    await uploader.getByTestId("upload").click();
     await expect(localProgress).toContainText("Receiving music from another computer", { timeout: 10_000 });
     await expect.poll(async () => (await progress.textContent()) ?? "", { timeout: 45_000 }).toMatch(/[1-9]\d*%/);
     expect(
@@ -205,9 +224,15 @@ test("passes the staged upload, immediate catalogue, organized storage, and down
     });
     process.stdout.write(`Data transfer benchmark: ${JSON.stringify(benchmark)}\n`);
   } finally {
+    if (libraryIsBlocked) restoreBlockedLibrary(isolatedLibrary, libraryBackup);
     await stopBroadcast(host);
   }
 });
+
+function restoreBlockedLibrary(library: string, backup: string): void {
+  if (fs.existsSync(library) && fs.statSync(library).isFile()) fs.unlinkSync(library);
+  if (fs.existsSync(backup)) fs.renameSync(backup, library);
+}
 
 async function daemonSnapshot(): Promise<AppSnapshot> {
   const response = await fetch(`${runtime.baseUrl}/api/v1/snapshot`, {

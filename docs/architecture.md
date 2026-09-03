@@ -101,6 +101,21 @@ managed-library placement. Provider absence, no-match, and operational failure
 are durable visible states; a manual scan retries the retryable states. A disconnect discards
 only incomplete staging data; completed originals remain available. Embedded
 tags outrank folder/filename inference; persistent user overrides outrank both.
+The receiver performs a durable write probe in the visible library before it
+accepts a transfer declaration. Destination names are byte-bounded and portable;
+cross-filesystem commits use a synced temporary destination file and atomic
+publication. If destination publication fails, the verified staged file remains
+eligible for a same-transaction `finish_file` retry and the precise filesystem
+stage is logged instead of being collapsed into a generic storage error.
+Selections larger than one receiver transaction are partitioned in the browser
+by file count, aggregate bytes, and control-frame size. Transactions commit in
+order, global progress spans the original selection, and the companion renews a
+near-expiry live grant between transactions through its trusted-device proof.
+The upload hello negotiates compact acknowledgements: each finished song returns
+only bounded imported metadata, catalogue snapshots stay local to the host, and
+the browser aggregates the transaction result. This keeps acknowledgement size
+independent of a multi-thousand-track catalogue while preserving the legacy
+response for companions that do not advertise the capability.
 The broadcasting host renders acknowledged operations as a local transfer strip
 with the current path, byte progress, percentage, and per-file catalogue count,
 then preserves a completion or interruption result long enough for the laptop

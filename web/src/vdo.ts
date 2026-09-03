@@ -1,11 +1,13 @@
 import VDONinja, { type VDONinjaEvent } from "@vdoninja/sdk";
 import { deriveRendezvousRoute, type RendezvousRoute } from "./rendezvous";
+import { partitionUploadBatches } from "./upload-batches";
 import type {
   Action,
   ActionRequest,
   AppSnapshot,
   BroadcastSession,
   CompanionInvitation,
+  ImportedFile,
   RemoteMode,
   RemoteUploadResponse,
   Track,
@@ -25,11 +27,12 @@ const BINARY_UPLOAD_REPLY_PROTOCOL = "zuradio.upload.reply.v1";
 const BINARY_UPLOAD_CHANNEL = "zuradio-upload-v1";
 const BINARY_UPLOAD_CHANNEL_LABEL = `x-${BINARY_UPLOAD_CHANNEL}`;
 const BINARY_UPLOAD_TRANSPORT = "binary-v1";
+const COMPACT_UPLOAD_RESPONSE = "compact-v1";
 const BINARY_UPLOAD_BUFFER_HIGH_BYTES = 1024 * 1024;
 const BINARY_UPLOAD_BUFFER_LOW_BYTES = 512 * 1024;
 const UPLOAD_CHUNK_WINDOW = 8;
-const MAX_UPLOAD_FILES = 512;
 const MAX_UPLOAD_FILE_BYTES = 512 * 1024 * 1024;
+const UPLOAD_GRANT_RENEWAL_WINDOW_MS = 5 * 60 * 1_000;
 const MAX_RENDEZVOUS_PEERS = 16;
 const MAX_STALE_SESSION_RETRIES = 3;
 const MAX_TRANSIENT_CONNECT_RETRIES = 4;
@@ -55,6 +58,7 @@ interface HostGrant {
   peerId: string;
   mode: RemoteMode;
   expiresAt: number;
+  compactUploadResponses: boolean;
 }
 
 interface PendingRequest {
@@ -328,6 +332,7 @@ export class HostBroadcastBridge {
           peerId,
           mode,
           expiresAt: Date.now() + response.expiresInSeconds * 1_000,
+          compactUploadResponses: message.uploadResponse === COMPACT_UPLOAD_RESPONSE,
         });
         this.control?.sendData(
           {
@@ -390,12 +395,22 @@ export class HostBroadcastBridge {
         this.publishState(snapshot);
       } else if (message.type === "zuradio.upload") {
         if (grant.mode !== "upload") throw new Error("This grant cannot upload music");
-        const response = await this.callbacks.upload({
+        let response = await this.callbacks.upload({
           grantId: grant.grantId,
           peerId: grant.peerId,
           sequence,
           operation: message.operation,
         });
+        if (grant.compactUploadResponses && isUploadResponse(response)) {
+          const operation = message.operation as { kind?: unknown } | undefined;
+          response = {
+            outcome:
+              operation?.kind === "commit"
+                ? { ...response.outcome, imported: [] }
+                : response.outcome,
+            snapshot: null,
+          };
+        }
         this.control?.sendData(
           { type: "zuradio.uploaded", sequence, response },
           { uuid, preference: "all", allowFallback: false },
@@ -501,6 +516,7 @@ export class CompanionBridge {
   private discoveryPeerUuids = new Set<string>();
   private controlPeerUuid: string | null = null;
   private grantId: string | null = null;
+  private grantExpiresAt: number | null = null;
   private analysisContext: AudioContext | null = null;
   private analysisSource: MediaStreamAudioSourceNode | null = null;
   private analysisAnalyser: AnalyserNode | null = null;
@@ -718,21 +734,60 @@ export class CompanionBridge {
 
   async uploadFiles(files: File[], onProgress: (progress: UploadProgress) => void): Promise<UploadOutcome> {
     if (!this.isUploader) throw new Error("Upload mode is not authenticated");
-    if (files.length === 0 || files.length > MAX_UPLOAD_FILES) {
-      throw new Error(`Choose between 1 and ${MAX_UPLOAD_FILES} audio files`);
-    }
+    if (files.length === 0) throw new Error("Choose at least one audio file");
     for (const file of files) {
       if (file.size === 0 || file.size > MAX_UPLOAD_FILE_BYTES) {
         throw new Error(`${file.name} is empty or larger than 512 MiB`);
       }
     }
-    const transferId = `transfer-${crypto.randomUUID()}`;
-    const entries = files.map((file) => ({
+    const entries = files.map((file, fileIndex) => ({
       file,
       fileId: `file-${crypto.randomUUID()}`,
       relativePath: file.webkitRelativePath || file.name,
+      size: file.size,
+      fileIndex,
     }));
-    let cataloguedCount = 0;
+    const batches = partitionUploadBatches(entries);
+    const imported: ImportedFile[] = [];
+    let lastOutcome: UploadOutcome | null = null;
+    for (const batch of batches) {
+      try {
+        if (
+          lastOutcome &&
+          this.grantExpiresAt !== null &&
+          this.grantExpiresAt - Date.now() <= UPLOAD_GRANT_RENEWAL_WINDOW_MS
+        ) {
+          this.callbacks.onStatus("Renewing secure upload access…");
+          await this.connectTrusted("upload");
+        }
+        lastOutcome = await this.uploadBatch(batch, files.length, imported.length, onProgress);
+        imported.push(...lastOutcome.imported);
+      } catch (error) {
+        if (imported.length === 0) throw error;
+        const reason = error instanceof Error ? error.message : String(error);
+        throw new Error(
+          `${reason}. ${imported.length} earlier track${imported.length === 1 ? " was" : "s were"} already catalogued safely; retry the selection to continue`,
+        );
+      }
+    }
+    return {
+      status: lastOutcome?.status ?? "committed",
+      transferId: lastOutcome?.transferId ?? "",
+      fileId: null,
+      received: null,
+      imported,
+    };
+  }
+
+  private async uploadBatch(
+    entries: Array<{ file: File; fileId: string; relativePath: string; size: number; fileIndex: number }>,
+    totalFileCount: number,
+    previouslyCatalogued: number,
+    onProgress: (progress: UploadProgress) => void,
+  ): Promise<UploadOutcome> {
+    const transferId = `transfer-${crypto.randomUUID()}`;
+    let cataloguedCount = previouslyCatalogued;
+    const imported: ImportedFile[] = [];
     await this.sendUpload({
       kind: "begin",
       transferId,
@@ -741,15 +796,14 @@ export class CompanionBridge {
     if (this.uploadTransport === "binary-v1") await this.ensureUploadChannel();
     onProgress({
       fileName: entries[0]?.relativePath ?? "Selected music",
-      fileIndex: 0,
-      fileCount: entries.length,
+      fileIndex: entries[0]?.fileIndex ?? 0,
+      fileCount: totalFileCount,
       fileReceived: 0,
       fileSize: entries[0]?.file.size ?? 1,
       cataloguedCount,
     });
     try {
-      for (let fileIndex = 0; fileIndex < entries.length; fileIndex += 1) {
-        const entry = entries[fileIndex];
+      for (const entry of entries) {
         if (!entry) continue;
         const digestPromise = entry.file
           .arrayBuffer()
@@ -767,8 +821,8 @@ export class CompanionBridge {
               this.sendUploadChunk(transferId, entry.fileId, offset, chunk, entry.relativePath).then(() => {
                 onProgress({
                   fileName: entry.relativePath,
-                  fileIndex,
-                  fileCount: entries.length,
+                  fileIndex: entry.fileIndex,
+                  fileCount: totalFileCount,
                   fileReceived: received,
                   fileSize: entry.file.size,
                   cataloguedCount,
@@ -791,18 +845,19 @@ export class CompanionBridge {
           fileId: entry.fileId,
           sha256: digest,
         });
+        imported.push(...finished.outcome.imported);
         cataloguedCount += finished.outcome.imported.length;
         onProgress({
           fileName: entry.relativePath,
-          fileIndex,
-          fileCount: entries.length,
+          fileIndex: entry.fileIndex,
+          fileCount: totalFileCount,
           fileReceived: entry.file.size,
           fileSize: entry.file.size,
           cataloguedCount,
         });
       }
       const committed = await this.sendUpload({ kind: "commit", transferId });
-      return committed.outcome;
+      return { ...committed.outcome, imported };
     } catch (error) {
       await this.sendUpload({ kind: "abort", transferId }, 2_000).catch(() => undefined);
       throw error;
@@ -829,6 +884,7 @@ export class CompanionBridge {
     this.discoveryPeerUuids.clear();
     this.controlPeerUuid = null;
     this.grantId = null;
+    this.grantExpiresAt = null;
     this.authKey?.fill(0);
     this.authKey = null;
     this.connectionAuth = null;
@@ -951,6 +1007,7 @@ export class CompanionBridge {
             authKind: auth.kind,
             deviceId,
             ...(auth.kind === "device" ? { deviceToken: auth.trusted.token } : {}),
+            ...(invitation.mode === "upload" ? { uploadResponse: COMPACT_UPLOAD_RESPONSE } : {}),
           },
           serverProof,
         };
@@ -987,6 +1044,7 @@ export class CompanionBridge {
       this.pendingServerProof = null;
       this.pendingHello = null;
       this.grantId = stringField(message, "grantId", 256);
+      this.grantExpiresAt = Date.now() + numberField(message, "expiresInSeconds") * 1_000;
       this.uploadTransport = message.uploadTransport === BINARY_UPLOAD_TRANSPORT ? "binary-v1" : "json-v1";
       if (
         this.connectionAuth?.kind === "password" &&

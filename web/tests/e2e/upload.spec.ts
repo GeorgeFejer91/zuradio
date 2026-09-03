@@ -267,6 +267,73 @@ test("selects a folder, ignores non-audio files, and imports every track", async
   }
 });
 
+test("splits a large declaration into bounded transactions while keeping global progress", async ({
+  browser,
+}) => {
+  test.setTimeout(180_000);
+  const host = await authenticatedHost(browser);
+  const declaredBatchSizes: number[] = [];
+  host.on("request", (request) => {
+    if (request.method() !== "POST" || !request.url().endsWith("/api/v1/remote/upload")) return;
+    try {
+      const body = request.postDataJSON() as { operation?: { kind?: string; files?: unknown[] } };
+      if (body.operation?.kind === "begin" && Array.isArray(body.operation.files)) {
+        declaredBatchSizes.push(body.operation.files.length);
+      }
+    } catch {
+      // Only valid JSON upload declarations are relevant to this assertion.
+    }
+  });
+  try {
+    await startFreshBroadcast(host);
+    const uploader = await browser.newPage();
+    await uploader.goto(companionBase);
+    await uploader.setViewportSize({ width: 390, height: 844 });
+    await uploader.getByTestId("connect-upload").click();
+    await uploader.getByTestId("password").fill(password);
+    await uploader.getByTestId("connect").click();
+    await expect(uploader.getByText("Upload connected", { exact: true })).toBeVisible({ timeout: 45_000 });
+
+    const files = Array.from({ length: 8 }, (_, index) => ({
+      name: `${"🎵".repeat(490)}-${index}.wav`,
+      mimeType: "audio/wav",
+      buffer: minimalWav(index),
+    }));
+    await uploader.locator("[data-upload-files]").setInputFiles(files);
+    await expect(uploader.getByTestId("upload-selection")).toHaveText("8 files selected");
+    await uploader.evaluate(() => {
+      const history: string[] = [];
+      Object.defineProperty(window, "__zuradioBulkProgress", { value: history });
+      const app = document.querySelector("#app");
+      if (app) {
+        new MutationObserver(() => {
+          const value = app.querySelector("[data-testid='upload-progress']")?.textContent ?? "";
+          if (value && history.at(-1) !== value) history.push(value);
+        }).observe(app, {
+          childList: true,
+          subtree: true,
+        });
+      }
+    });
+
+    await uploader.getByTestId("upload").click();
+    await expect(uploader.getByTestId("upload-progress")).toContainText("8 tracks added to the laptop library", {
+      timeout: 120_000,
+    });
+    await expect(uploader.locator(".imported-list li")).toHaveCount(8);
+    await expect(host.getByTestId("local-transfer-status")).toContainText("Transfer complete");
+    const progressHistory = await uploader.evaluate(
+      () => (window as unknown as { __zuradioBulkProgress: string[] }).__zuradioBulkProgress,
+    );
+    expect(progressHistory.some((value) => value.includes("8/8") && value.includes("8 catalogued"))).toBe(true);
+    expect(declaredBatchSizes.length).toBeGreaterThan(1);
+    expect(declaredBatchSizes.reduce((total, size) => total + size, 0)).toBe(8);
+    expect(declaredBatchSizes.every((size) => size > 0 && size < 8)).toBe(true);
+  } finally {
+    await stopBroadcast(host);
+  }
+});
+
 async function authenticatedHost(browser: Browser): Promise<Page> {
   const page = await browser.newPage();
   await page.goto(`${runtime.hostUrl}&autobroadcast=0`);
@@ -285,4 +352,22 @@ async function startFreshBroadcast(host: Page): Promise<void> {
 async function stopBroadcast(host: Page): Promise<void> {
   await host.evaluate(() => fetch("/api/v1/broadcast/stop", { method: "POST" })).catch(() => undefined);
   await host.close().catch(() => undefined);
+}
+
+function minimalWav(sample: number): Buffer {
+  const bytes = Buffer.alloc(46);
+  bytes.write("RIFF", 0, "ascii");
+  bytes.writeUInt32LE(38, 4);
+  bytes.write("WAVEfmt ", 8, "ascii");
+  bytes.writeUInt32LE(16, 16);
+  bytes.writeUInt16LE(1, 20);
+  bytes.writeUInt16LE(1, 22);
+  bytes.writeUInt32LE(8_000, 24);
+  bytes.writeUInt32LE(16_000, 28);
+  bytes.writeUInt16LE(2, 32);
+  bytes.writeUInt16LE(16, 34);
+  bytes.write("data", 36, "ascii");
+  bytes.writeUInt32LE(2, 40);
+  bytes.writeInt16LE(sample, 44);
+  return bytes;
 }

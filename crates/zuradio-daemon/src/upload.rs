@@ -11,6 +11,7 @@ use lofty::tag::{Accessor, ItemKey};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use thiserror::Error;
+use uuid::Uuid;
 
 pub(crate) const MAX_CHUNK_BYTES: usize = 64 * 1024;
 const MAX_ENCODED_CHUNK_BYTES: usize = MAX_CHUNK_BYTES.div_ceil(3) * 4;
@@ -18,6 +19,8 @@ const MAX_FILES: usize = 512;
 const MAX_FILE_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_BATCH_BYTES: u64 = 16 * 1024 * 1024 * 1024;
 const MAX_RELATIVE_PATH_CHARS: usize = 512;
+const MAX_MANAGED_COMPONENT_BYTES: usize = 80;
+const MAX_IMPORTED_METADATA_BYTES: usize = 512;
 const SUPPORTED_EXTENSIONS: &[&str] = &[
     "aac", "aif", "aiff", "alac", "flac", "m4a", "mp3", "mp4", "ogg", "opus", "wav", "webm",
 ];
@@ -96,13 +99,30 @@ pub(crate) enum UploadError {
     Integrity,
     #[error("uploaded media could not be read")]
     Media,
-    #[error("upload storage is unavailable")]
-    Storage,
+    #[error("upload storage is unavailable while {stage}: {source}")]
+    Storage {
+        stage: &'static str,
+        #[source]
+        source: io::Error,
+    },
 }
 
 impl From<io::Error> for UploadError {
-    fn from(_: io::Error) -> Self {
-        Self::Storage
+    fn from(source: io::Error) -> Self {
+        Self::storage("accessing upload storage", source)
+    }
+}
+
+impl UploadError {
+    pub(crate) fn storage(stage: &'static str, source: io::Error) -> Self {
+        Self::Storage { stage, source }
+    }
+
+    fn unavailable(stage: &'static str) -> Self {
+        Self::storage(
+            stage,
+            io::Error::other("required storage path is unavailable"),
+        )
     }
 }
 
@@ -196,6 +216,8 @@ impl UploadManager {
         if total > MAX_BATCH_BYTES {
             return Err(UploadError::TooLarge);
         }
+
+        verify_library_storage(&self.library_root)?;
 
         let directory = self.staging_root.join(&transfer_id);
         fs::create_dir(&directory).map_err(|_| UploadError::Invalid)?;
@@ -304,17 +326,20 @@ impl UploadManager {
         if entry.received != entry.spec.size || entry.digest.is_some() {
             return Err(UploadError::Integrity);
         }
-        if let Some(mut file) = entry.file.take() {
-            file.flush()?;
-            file.sync_all()?;
+        if let Some(file) = entry.file.as_mut() {
+            file.flush()
+                .map_err(|source| UploadError::storage("flushing the staged file", source))?;
+            file.sync_all()
+                .map_err(|source| UploadError::storage("syncing the staged file", source))?;
         }
+        entry.file = None;
         let actual = encode_hex(&entry.hasher.clone().finalize());
         if !actual.eq_ignore_ascii_case(expected_digest) {
             return Err(UploadError::Integrity);
         }
-        entry.digest = Some(actual);
-        let prepared = prepare_import(&library_root, entry)?;
+        let prepared = prepare_import(&library_root, entry, &actual)?;
         commit_prepared(&prepared)?;
+        entry.digest = Some(actual);
         let imported = prepared.imported.clone();
         let destination = prepared.destination.clone();
         let received = entry.received;
@@ -407,7 +432,9 @@ fn available_migration_path(preferred: &Path) -> Result<PathBuf, UploadError> {
     if !preferred.exists() {
         return Ok(preferred.to_path_buf());
     }
-    let parent = preferred.parent().ok_or(UploadError::Storage)?;
+    let parent = preferred
+        .parent()
+        .ok_or_else(|| UploadError::unavailable("resolving the legacy library destination"))?;
     let stem = preferred
         .file_stem()
         .and_then(|value| value.to_str())
@@ -423,7 +450,9 @@ fn available_migration_path(preferred: &Path) -> Result<PathBuf, UploadError> {
             return Ok(candidate);
         }
     }
-    Err(UploadError::Storage)
+    Err(UploadError::unavailable(
+        "finding an unused legacy library destination",
+    ))
 }
 
 fn validate_spec(spec: &UploadFileSpec) -> Result<(), UploadError> {
@@ -485,18 +514,130 @@ struct PreparedImport {
 }
 
 fn commit_prepared(item: &PreparedImport) -> Result<(), UploadError> {
-    if let Some(parent) = item.destination.parent() {
-        fs::create_dir_all(parent)?;
+    let parent = item
+        .destination
+        .parent()
+        .ok_or_else(|| UploadError::unavailable("resolving the managed library destination"))?;
+    fs::create_dir_all(parent)
+        .map_err(|source| UploadError::storage("creating managed library folders", source))?;
+    if item.destination.try_exists().map_err(|source| {
+        UploadError::storage("checking the managed library destination", source)
+    })? {
+        remove_staged_file(&item.staged_path)?;
+        return Ok(());
     }
-    if item.destination.exists() {
-        fs::remove_file(&item.staged_path)?;
-    } else {
-        fs::rename(&item.staged_path, &item.destination)?;
+    match fs::rename(&item.staged_path, &item.destination) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::CrossesDevices => {
+            copy_commit_across_filesystems(item, parent)
+        }
+        Err(source) => Err(UploadError::storage(
+            "moving the verified file into the managed library",
+            source,
+        )),
     }
-    Ok(())
 }
 
-fn prepare_import(library_root: &Path, entry: &UploadFile) -> Result<PreparedImport, UploadError> {
+fn verify_library_storage(library_root: &Path) -> Result<(), UploadError> {
+    fs::create_dir_all(library_root)
+        .map_err(|source| UploadError::storage("preparing the managed library", source))?;
+    let probe = library_root.join(format!(".zuradio-write-probe-{}.tmp", Uuid::new_v4()));
+    let result = (|| {
+        let mut file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&probe)
+            .map_err(|source| {
+                UploadError::storage("verifying managed library write access", source)
+            })?;
+        file.write_all(b"zuradio")
+            .map_err(|source| UploadError::storage("writing the managed library probe", source))?;
+        file.flush()
+            .map_err(|source| UploadError::storage("flushing the managed library probe", source))?;
+        file.sync_all()
+            .map_err(|source| UploadError::storage("syncing the managed library probe", source))?;
+        drop(file);
+        fs::remove_file(&probe)
+            .map_err(|source| UploadError::storage("removing the managed library probe", source))
+    })();
+    if result.is_err() {
+        let _ = fs::remove_file(&probe);
+    }
+    result
+}
+
+fn copy_commit_across_filesystems(
+    item: &PreparedImport,
+    destination_parent: &Path,
+) -> Result<(), UploadError> {
+    let temporary = destination_parent.join(format!(".zuradio-copy-{}.tmp", Uuid::new_v4()));
+    let copy_result = (|| {
+        let mut source = File::open(&item.staged_path).map_err(|source| {
+            UploadError::storage("opening the verified staged file for copying", source)
+        })?;
+        let mut target = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary)
+            .map_err(|source| {
+                UploadError::storage("creating a temporary managed library file", source)
+            })?;
+        io::copy(&mut source, &mut target).map_err(|source| {
+            UploadError::storage("copying the verified file into the managed library", source)
+        })?;
+        target.flush().map_err(|source| {
+            UploadError::storage("flushing the temporary managed library file", source)
+        })?;
+        target.sync_all().map_err(|source| {
+            UploadError::storage("syncing the temporary managed library file", source)
+        })?;
+        drop(target);
+        match fs::rename(&temporary, &item.destination) {
+            Ok(()) => Ok(()),
+            Err(publish_error) => match item.destination.try_exists() {
+                Ok(true) => {
+                    fs::remove_file(&temporary).map_err(|cleanup_error| {
+                        UploadError::storage(
+                            "removing a redundant temporary library file",
+                            cleanup_error,
+                        )
+                    })?;
+                    Ok(())
+                }
+                Ok(false) => Err(UploadError::storage(
+                    "publishing the copied file in the managed library",
+                    publish_error,
+                )),
+                Err(probe_error) => Err(UploadError::storage(
+                    "checking a concurrent library commit",
+                    probe_error,
+                )),
+            },
+        }
+    })();
+    if copy_result.is_err() {
+        let _ = fs::remove_file(&temporary);
+    }
+    copy_result?;
+    remove_staged_file(&item.staged_path)
+}
+
+fn remove_staged_file(path: &Path) -> Result<(), UploadError> {
+    match fs::remove_file(path) {
+        Ok(()) => Ok(()),
+        Err(source) if source.kind() == io::ErrorKind::NotFound => Ok(()),
+        Err(source) => Err(UploadError::storage(
+            "removing the completed staged file",
+            source,
+        )),
+    }
+}
+
+fn prepare_import(
+    library_root: &Path,
+    entry: &UploadFile,
+    digest: &str,
+) -> Result<PreparedImport, UploadError> {
     let parsed = read_from_path(&entry.staged_path).map_err(|_| UploadError::Media)?;
     let tag = parsed.primary_tag().or_else(|| parsed.first_tag());
     let inferred = infer_from_relative_path(&entry.spec.relative_path)?;
@@ -533,7 +674,6 @@ fn prepare_import(library_root: &Path, entry: &UploadFile) -> Result<PreparedImp
         .join(sanitize_component(album_artist))
         .join(album_folder);
     let prefix = track_number.map_or_else(String::new, |value| format!("{value:02} - "));
-    let digest = entry.digest.as_deref().ok_or(UploadError::Integrity)?;
     let digest_prefix = digest.get(..12).ok_or(UploadError::Integrity)?;
     let filename = format!(
         "{prefix}{} [{digest_prefix}].{extension}",
@@ -542,9 +682,9 @@ fn prepare_import(library_root: &Path, entry: &UploadFile) -> Result<PreparedImp
     let destination = directory.join(filename);
     Ok(PreparedImport {
         imported: ImportedFile {
-            title,
-            artist,
-            album,
+            title: bounded_metadata(&title),
+            artist: bounded_metadata(&artist),
+            album: bounded_metadata(&album),
             year,
         },
         staged_path: entry.staged_path.clone(),
@@ -641,28 +781,72 @@ fn fallback_if_empty(value: &str, fallback: &str) -> String {
 }
 
 fn sanitize_component(value: &str) -> String {
-    let cleaned: String = value
-        .trim()
-        .chars()
-        .map(|character| {
-            if character.is_control()
-                || matches!(
-                    character,
-                    '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
-                )
-            {
-                '_'
-            } else {
-                character
-            }
-        })
-        .take(80)
-        .collect();
+    let mut cleaned = String::new();
+    for character in value.trim().chars() {
+        let safe = if character.is_control()
+            || matches!(
+                character,
+                '/' | '\\' | ':' | '*' | '?' | '"' | '<' | '>' | '|'
+            ) {
+            '_'
+        } else {
+            character
+        };
+        if cleaned.len() + safe.len_utf8() > MAX_MANAGED_COMPONENT_BYTES {
+            break;
+        }
+        cleaned.push(safe);
+    }
+    while cleaned.ends_with([' ', '.']) {
+        cleaned.pop();
+    }
     if cleaned.is_empty() || matches!(cleaned.as_str(), "." | "..") {
         "Unknown".to_owned()
+    } else if is_windows_reserved_component(&cleaned) {
+        format!("_{cleaned}")
     } else {
         cleaned
     }
+}
+
+fn bounded_metadata(value: &str) -> String {
+    if value.len() <= MAX_IMPORTED_METADATA_BYTES {
+        return value.to_owned();
+    }
+    let mut end = MAX_IMPORTED_METADATA_BYTES;
+    while !value.is_char_boundary(end) {
+        end -= 1;
+    }
+    value[..end].to_owned()
+}
+
+fn is_windows_reserved_component(value: &str) -> bool {
+    let stem = value.split('.').next().unwrap_or(value);
+    matches!(
+        stem.to_ascii_uppercase().as_str(),
+        "CON"
+            | "PRN"
+            | "AUX"
+            | "NUL"
+            | "COM1"
+            | "COM2"
+            | "COM3"
+            | "COM4"
+            | "COM5"
+            | "COM6"
+            | "COM7"
+            | "COM8"
+            | "COM9"
+            | "LPT1"
+            | "LPT2"
+            | "LPT3"
+            | "LPT4"
+            | "LPT5"
+            | "LPT6"
+            | "LPT7"
+            | "LPT8"
+            | "LPT9"
+    )
 }
 
 fn outcome(
@@ -727,7 +911,8 @@ mod tests {
 
     #[test]
     fn enforces_order_size_and_digest() -> Result<(), UploadError> {
-        let directory = tempdir().map_err(|_| UploadError::Storage)?;
+        let directory = tempdir()
+            .map_err(|source| UploadError::storage("creating a test directory", source))?;
         let library = directory.path().join("library");
         let mut manager = UploadManager::new(directory.path(), &library)?;
         let transfer = "transfer-12345678";
@@ -770,6 +955,17 @@ mod tests {
     fn sanitizes_metadata_components() {
         assert_eq!(sanitize_component("../A/B: C"), ".._A_B_ C");
         assert_eq!(sanitize_component(".."), "Unknown");
+        assert_eq!(sanitize_component("CON"), "_CON");
+        assert_eq!(sanitize_component("nul.txt"), "_nul.txt");
+        assert_eq!(sanitize_component("Album..."), "Album");
+
+        let unicode = sanitize_component(&"é".repeat(80));
+        assert_eq!(unicode.len(), MAX_MANAGED_COMPONENT_BYTES);
+        assert_eq!(unicode.chars().count(), MAX_MANAGED_COMPONENT_BYTES / 2);
+
+        let imported = bounded_metadata(&"🎵".repeat(200));
+        assert_eq!(imported.len(), MAX_IMPORTED_METADATA_BYTES);
+        assert_eq!(imported.chars().count(), MAX_IMPORTED_METADATA_BYTES / 4);
     }
 
     #[test]
@@ -787,7 +983,8 @@ mod tests {
 
     #[test]
     fn catalogues_each_finished_file_into_the_visible_library() -> Result<(), UploadError> {
-        let directory = tempdir().map_err(|_| UploadError::Storage)?;
+        let directory = tempdir()
+            .map_err(|source| UploadError::storage("creating a test directory", source))?;
         let library = directory.path().join("Music/Zuradio Library");
         let mut manager = UploadManager::new(directory.path(), &library)?;
         let transfer = "transfer-immediate";
@@ -816,7 +1013,9 @@ mod tests {
 
         assert_eq!(finished.status, "catalogued");
         assert_eq!(finished.imported.len(), 1);
-        let path = finished.catalogued_path.ok_or(UploadError::Storage)?;
+        let path = finished
+            .catalogued_path
+            .ok_or_else(|| UploadError::unavailable("reading the catalogued test path"))?;
         assert!(path.is_file());
         assert!(path.starts_with(&library));
 
@@ -827,9 +1026,14 @@ mod tests {
 
     #[test]
     fn migrates_legacy_managed_files_out_of_hidden_app_data() -> Result<(), UploadError> {
-        let directory = tempdir().map_err(|_| UploadError::Storage)?;
+        let directory = tempdir()
+            .map_err(|source| UploadError::storage("creating a test directory", source))?;
         let legacy = directory.path().join("library/Artist/Album/01 - Song.mp3");
-        fs::create_dir_all(legacy.parent().ok_or(UploadError::Storage)?)?;
+        fs::create_dir_all(
+            legacy
+                .parent()
+                .ok_or_else(|| UploadError::unavailable("resolving the legacy test path"))?,
+        )?;
         fs::write(&legacy, b"legacy fixture")?;
         let visible = directory.path().join("Music/Zuradio Library");
 
@@ -842,7 +1046,8 @@ mod tests {
 
     #[test]
     fn removes_abandoned_staging_files_on_startup() -> Result<(), UploadError> {
-        let directory = tempdir().map_err(|_| UploadError::Storage)?;
+        let directory = tempdir()
+            .map_err(|source| UploadError::storage("creating a test directory", source))?;
         let library = directory.path().join("Music/Zuradio Library");
         let transfer = "transfer-abandoned";
         {
@@ -865,6 +1070,131 @@ mod tests {
             0,
             "a restarted daemon must not retain an unresumable partial transfer"
         );
+        Ok(())
+    }
+
+    #[test]
+    fn retries_cataloguing_after_a_transient_destination_failure() -> Result<(), UploadError> {
+        let directory = tempdir()
+            .map_err(|source| UploadError::storage("creating a test directory", source))?;
+        let library = directory.path().join("Music/Zuradio Library");
+        let mut manager = UploadManager::new(directory.path(), &library)?;
+        let transfer = "transfer-retry";
+        let file = "file-retry";
+        let bytes = minimal_wav();
+        manager.execute(UploadOperation::Begin {
+            transfer_id: transfer.into(),
+            files: vec![UploadFileSpec {
+                file_id: file.into(),
+                relative_path: "Retry Artist/Retry Album/Retry Song.wav".into(),
+                size: u64::try_from(bytes.len()).map_err(|_| UploadError::TooLarge)?,
+            }],
+        })?;
+        manager.execute(UploadOperation::Chunk {
+            transfer_id: transfer.into(),
+            file_id: file.into(),
+            offset: 0,
+            data: STANDARD.encode(&bytes),
+        })?;
+        let digest = encode_hex(&Sha256::digest(&bytes));
+
+        fs::remove_dir(&library)?;
+        fs::write(&library, b"temporary destination blocker")?;
+        let first = manager.execute(UploadOperation::FinishFile {
+            transfer_id: transfer.into(),
+            file_id: file.into(),
+            sha256: digest.clone(),
+        });
+        let error = match first {
+            Err(error @ UploadError::Storage { .. }) => error,
+            Err(error) => return Err(error),
+            Ok(_) => {
+                return Err(UploadError::unavailable(
+                    "verifying the blocked test destination",
+                ));
+            }
+        };
+        let message = error.to_string();
+        assert!(message.contains("creating managed library folders"));
+
+        fs::remove_file(&library)?;
+        fs::create_dir_all(&library)?;
+        let retried = manager.execute(UploadOperation::FinishFile {
+            transfer_id: transfer.into(),
+            file_id: file.into(),
+            sha256: digest,
+        })?;
+        assert_eq!(retried.status, "catalogued");
+        assert!(retried.catalogued_path.is_some_and(|path| path.is_file()));
+        Ok(())
+    }
+
+    #[test]
+    fn rejects_a_transfer_before_receiving_bytes_when_the_library_is_unavailable()
+    -> Result<(), UploadError> {
+        let directory = tempdir()
+            .map_err(|source| UploadError::storage("creating a test directory", source))?;
+        let library = directory.path().join("Music/Zuradio Library");
+        let mut manager = UploadManager::new(directory.path(), &library)?;
+        fs::remove_dir(&library)?;
+        fs::write(&library, b"destination blocker")?;
+
+        let result = manager.execute(UploadOperation::Begin {
+            transfer_id: "transfer-preflight".into(),
+            files: vec![UploadFileSpec {
+                file_id: "file-preflight".into(),
+                relative_path: "Artist/Album/Song.wav".into(),
+                size: 42,
+            }],
+        });
+
+        let error = match result {
+            Err(error @ UploadError::Storage { .. }) => error,
+            Err(error) => return Err(error),
+            Ok(_) => {
+                return Err(UploadError::unavailable(
+                    "verifying unavailable-library rejection",
+                ));
+            }
+        };
+        assert!(error.to_string().contains("managed library"));
+        assert!(!directory.path().join("uploads/transfer-preflight").exists());
+        Ok(())
+    }
+
+    #[test]
+    fn copy_commit_publishes_atomically_and_removes_staging() -> Result<(), UploadError> {
+        let directory = tempdir()
+            .map_err(|source| UploadError::storage("creating a test directory", source))?;
+        let staged_path = directory.path().join("upload.part.wav");
+        let destination_parent = directory.path().join("library/Artist/Album");
+        let destination = destination_parent.join("Song [digest].wav");
+        let bytes = minimal_wav();
+        fs::write(&staged_path, &bytes)?;
+        fs::create_dir_all(&destination_parent)?;
+        let prepared = PreparedImport {
+            imported: ImportedFile {
+                title: "Song".into(),
+                artist: "Artist".into(),
+                album: "Album".into(),
+                year: None,
+            },
+            staged_path: staged_path.clone(),
+            destination: destination.clone(),
+        };
+
+        copy_commit_across_filesystems(&prepared, &destination_parent)?;
+
+        assert_eq!(fs::read(destination)?, bytes);
+        assert!(!staged_path.exists());
+        assert!(fs::read_dir(destination_parent)?.all(|entry| {
+            entry.is_ok_and(|entry| {
+                !entry
+                    .file_name()
+                    .to_string_lossy()
+                    .starts_with(".zuradio-copy-")
+            })
+        }));
         Ok(())
     }
 

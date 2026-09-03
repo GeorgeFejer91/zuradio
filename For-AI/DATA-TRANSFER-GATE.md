@@ -13,8 +13,13 @@ Run `scripts/verify-data-transfer.sh` before
 daemon and drives the production companion in Chromium through the real
 VDO.Ninja data path. The test must prove, in order:
 
-1. **Declaration:** the browser selects at least two real audio files and sends
-   their IDs, relative paths, and exact sizes before bytes are accepted.
+1. **Declaration and storage preflight:** the browser selects at least two real
+   audio files and sends their IDs, relative paths, and exact sizes before bytes
+   are accepted. Rust must create, write, flush, sync, and remove a private probe
+   in the visible managed-library root before acknowledging `begin`. A missing,
+   read-only, or unavailable library must fail at this gate, before music bytes
+   cross the bridge, with the exact failed storage stage in the receiver log and
+   remote error (but without disclosing a local path).
 2. **Transfer start:** the UI observes non-zero acknowledged byte progress. The
    browser test must also observe the dedicated `x-zuradio-upload-v1` WebRTC data channel so a
    regression to large JSON/base64 frames cannot pass on loopback by accident.
@@ -23,7 +28,10 @@ VDO.Ninja data path. The test must prove, in order:
    server continues to reject zero-byte files, excess sizes, wrong offsets,
    path traversal, unsupported formats, stale sequences, and wrong-mode grants.
 3. **Per-file integrity:** every file is flushed and its browser SHA-256 digest
-   is verified before it leaves private staging.
+   is verified before it leaves private staging. A destination failure after
+   verification must not mark the file complete or destroy its staged bytes;
+   repeating `finish_file` in the same live transaction must be able to finish
+   after the destination is repaired without retransmitting the file.
 4. **Immediate catalogue publication:** the first completed song appears in the
    laptop library, and both the remote uploader and the local laptop transfer
    panel report it as catalogued, while later files in the same selection are
@@ -34,10 +42,22 @@ VDO.Ninja data path. The test must prove, in order:
    can never delay the catalogue or the remaining transfer.
 5. **Visible organized original:** the verified bytes reside under the isolated
    `Zuradio Library/<album artist>/<album (year)>/<track - title [digest]>.ext`
-   root. Each path component must be sanitized and the source bytes preserved.
+   root. Each generated path component must be bounded by UTF-8 bytes, reject
+   Windows-reserved component names and trailing spaces/dots, and preserve the
+   source bytes. A same-filesystem move is preferred; `EXDEV` must fall back to
+   copy, flush, sync, and atomic publication through a temporary file in the
+   destination directory.
 6. **Batch completion:** `commit` succeeds only after all declared files finish.
    A disconnect, abort, or restart removes incomplete, unresumable staging data
-   but never removes a file that already completed and entered the library.
+   but never removes a file that already completed and entered the library. A
+   browser selection larger than one receiver transaction must be divided into
+   ordered, independently committed transactions without exceeding 512 files,
+   16 GiB, or the 16 KiB WebRTC control-message ceiling. Uploader progress and
+   the final result remain global across the original selection; an error must
+   say how many earlier tracks are already safely committed. A negotiated
+   compact-response client must accumulate the per-file summaries locally;
+   upload acknowledgements must not carry the ever-growing full catalogue, and
+   an older client that does not advertise this capability must remain valid.
 7. **Authenticated download:** the local media endpoint retrieves each newly
    catalogued file byte-for-byte. The downloaded size and SHA-256 set must equal
    the selected source set. Public companion code must still have no direct
@@ -71,14 +91,23 @@ an optional provider while claiming automatic acoustic metadata is integral.
 ## Test layers that must remain
 
 - Rust upload tests cover path and size bounds, strict offset ordering, digest
-  mismatch, per-file survival after grant revocation, restart cleanup, metadata
-  inference, destination sanitization, and hidden-library migration.
-- `web/tests/e2e/data-transfer.spec.ts` is the browser/CLI benchmark above.
+  mismatch, pre-transfer library write probing, retry after a destination
+  failure, atomic cross-filesystem copy publication, per-file survival after
+  grant revocation, restart cleanup, UTF-8/Windows destination sanitization,
+  metadata inference, and hidden-library migration.
+- `web/tests/e2e/data-transfer.spec.ts` is the browser/CLI benchmark above. It
+  must make the isolated managed-library root unavailable, prove `begin` fails
+  visibly before byte progress, restore the root, and then complete the same
+  selected files successfully.
 - `web/tests/e2e/upload.spec.ts` covers direct file selection, folder selection,
   a Windows Chromium identity, a stale competing host, wrong passwords, and the
-  standalone `web/scripts/upload-cli.mjs` path. It must force a receiver-side
-  first-chunk rejection and prove the CLI prints that error plus its last transfer
-  stage rather than only timing out while waiting for final success.
+  standalone `web/scripts/upload-cli.mjs` path. It must force declaration-size
+  batching through more than one real receiver transaction while proving global
+  progress and completion. The pure partition test must exercise at least 9,088
+  ordered files against count, byte, and declaration-size bounds. It must also
+  force a receiver-side first-chunk rejection and prove the CLI prints that error
+  plus its last transfer stage rather than only timing out while waiting for
+  final success.
 - The full multi-browser gate remains mandatory after the focused transfer gate.
 
 Never replace a stage with a mocked channel, an HTTP-only upload, a unit test,
