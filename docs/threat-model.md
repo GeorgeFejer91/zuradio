@@ -4,11 +4,12 @@ Status: MVP security contract, 2026-09-01.
 
 ## Protected assets
 
-- Local file paths, tags, cover art, catalog membership, and listening history.
+- Local file paths, tags, cover art, catalog membership, listening history, and
+  retained chat messages.
 - The live audio stream and current player state.
 - The central remote password, password proofs, transport coordinates, and
   listen/control/upload grants.
-- Playback, queue, playlist, volume, scanning, and broadcast authority.
+- Playback, queue, playlist, chat-clear, volume, scanning, and broadcast authority.
 
 ## Untrusted components
 
@@ -46,6 +47,9 @@ but does not receive arbitrary filesystem or process authority.
 - Keep transport, controller, listener, and media secrets independent. Rotating
   the beacon or stopping the host revokes its complete epoch.
 - Validate one versioned JSON schema. Reject unknown actions and unknown fields.
+- Treat chat as bounded inert text: derive its local/remote sender from the
+  Rust-authorized role, escape it at every HTML render, retain only the latest
+  20 messages, permit posting only to Control, and permit deletion/clearing only locally.
 - Resolve media IDs through the catalog. Never accept a remote path. Canonicalize
   scan roots, reject escapes and special files, and handle symlinks explicitly.
 - Stage uploads beneath the private data directory; constrain count, per-file

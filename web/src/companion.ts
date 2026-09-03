@@ -1,12 +1,12 @@
 import "./style.css";
 
-import type { Action, AppSnapshot, ImportedFile, Playlist, RemoteMode, Track } from "./types";
+import type { Action, AppSnapshot, ChatMessage, ImportedFile, Playlist, RemoteMode, Track } from "./types";
 import { isSupportedAudioFileName, SUPPORTED_AUDIO_ACCEPT } from "./formats";
 import { icon, type IconName } from "./icons";
 import { CompanionBridge, type PublicNowPlaying } from "./vdo";
 import { renderSoundVisualizer, SvgSoundVisualizer } from "./visualizer";
 
-type ControllerView = "library" | "queue" | "playlists";
+type ControllerView = "library" | "queue" | "playlists" | "chat";
 const rootElement = document.querySelector<HTMLDivElement>("#app");
 if (!rootElement) throw new Error("Missing app root");
 const root: HTMLDivElement = rootElement;
@@ -30,6 +30,7 @@ let connected = false;
 let busy = false;
 let view: ControllerView = "library";
 let search = "";
+let chatDraft = "";
 let selectedMode: RemoteMode | null = null;
 let dialogMode: RemoteMode | null = null;
 let selectedFiles: File[] = [];
@@ -84,8 +85,8 @@ root.addEventListener("click", (event) => {
 });
 
 root.addEventListener("input", (event) => {
-  const input = event.target as HTMLInputElement;
-  if (input.matches("[data-upload-files], [data-upload-folder]")) {
+  const input = event.target as HTMLInputElement | HTMLTextAreaElement;
+  if (input instanceof HTMLInputElement && input.matches("[data-upload-files], [data-upload-folder]")) {
     selectUploads(input);
   } else if (input.matches("[data-search]")) {
     search = input.value;
@@ -93,6 +94,8 @@ root.addEventListener("input", (event) => {
   } else if (input.matches("[data-playlist-search]")) {
     playlistSearch = input.value;
     render();
+  } else if (input.matches("[data-chat-input]")) {
+    chatDraft = input.value;
   }
 });
 
@@ -124,6 +127,11 @@ root.addEventListener("submit", (event) => {
     const playlistId = form.dataset.playlistId;
     const name = (form.elements.namedItem("playlistName") as HTMLInputElement).value.trim();
     if (playlistId && name) void renamePlaylist(playlistId, name);
+    return;
+  }
+  if (form.matches("[data-chat-form]")) {
+    event.preventDefault();
+    void postChat(form);
     return;
   }
   if (!form.matches("[data-playlist-form]")) return;
@@ -179,6 +187,7 @@ async function handleClick(target: HTMLElement): Promise<void> {
     selectedFiles = [];
     importedFiles = [];
     uploadProgress = "";
+    chatDraft = "";
     busy = false;
     render();
     return;
@@ -404,8 +413,25 @@ async function renamePlaylist(playlistId: string, name: string): Promise<void> {
   render();
 }
 
+async function postChat(form: HTMLFormElement): Promise<void> {
+  const input = form.elements.namedItem("message") as HTMLTextAreaElement;
+  const text = input.value.trim();
+  if (!text) return;
+  if (await send({ kind: "chat_post", text })) {
+    chatDraft = "";
+    render();
+  }
+}
+
 function render(): void {
   const mode = selectedMode ?? bridge.mode;
+  const activeChatInput = document.activeElement instanceof HTMLTextAreaElement
+    && document.activeElement.matches("[data-chat-input]")
+    ? document.activeElement
+    : null;
+  const chatSelection = activeChatInput
+    ? [activeChatInput.selectionStart, activeChatInput.selectionEnd] as const
+    : null;
   root.innerHTML = `<main class="companion-shell ${connected ? `is-connected is-${mode ?? "listen"}` : "is-landing"}" aria-busy="${busy}">
     <header class="companion-header"><div class="companion-brand"><span class="brand-mark">${icon("music")}</span><div><span class="wordmark">ZURADIO</span><h1>Web Companion</h1></div></div>${connected ? `<span class="connection-live">${capitalize(mode ?? "listen")}</span>` : ""}</header>
     ${connected ? `<section class="connection-panel connected-strip"><div class="connection-summary"><span class="broadcast-indicator active"></span><div><strong>${escapeHtml(connectionStatus)}</strong><span>Linked directly to the laptop</span></div></div>${renderModeSwitcher(mode ?? "listen")}<button data-action="disconnect" ${disabled()}>Disconnect</button></section>` : renderConnectionModes()}
@@ -427,6 +453,12 @@ function render(): void {
   bindUploadInputs();
   root.querySelector("[data-audio-mount]")?.append(audio);
   visualizer.mount(root.querySelector<SVGSVGElement>("[data-testid='companion-visualizer']"), bridge);
+  scrollChatToLatest();
+  if (activeChatInput) {
+    const input = root.querySelector<HTMLTextAreaElement>("[data-chat-input]");
+    input?.focus();
+    if (input && chatSelection) input.setSelectionRange(chatSelection[0], chatSelection[1]);
+  }
 }
 
 function bindUploadInputs(): void {
@@ -457,7 +489,7 @@ function renderConnectionModes(): string {
     ${trustedUntil ? `<div class="trusted-device" data-testid="trusted-device"><span>Trusted until ${escapeHtml(formatTrustedUntil(trustedUntil))}</span><button data-action="forget-device">Forget this browser</button></div>` : ""}
     <div class="connect-modes">
       <button data-action="choose-mode" data-mode="listen" data-testid="connect-listen"><span>${icon("volume")}</span><strong>Listen</strong><small>Hear the live stream</small></button>
-      <button data-action="choose-mode" data-mode="control" data-testid="connect-control"><span>${icon("library")}</span><strong>Control</strong><small>Player, queue and playlists</small></button>
+      <button data-action="choose-mode" data-mode="control" data-testid="connect-control"><span>${icon("library")}</span><strong>Control</strong><small>Player, chat, queue and playlists</small></button>
       <button data-action="choose-mode" data-mode="upload" data-testid="connect-upload"><span>${icon("upload")}</span><strong>Upload</strong><small>Add music to the laptop</small></button>
     </div>
   </section>`;
@@ -541,12 +573,35 @@ function renderTransport(state: AppSnapshot): string {
 function renderController(state: AppSnapshot): string {
   return `<section class="controller-panel">
     <nav class="nav" aria-label="Controller sections">
-      ${(["library", "queue", "playlists"] as ControllerView[])
-        .map((item) => `<button data-action="view" data-view="${item}" aria-current="${view === item ? "page" : "false"}">${icon(item === "library" ? "library" : item === "queue" ? "queue" : "playlist")}<span>${capitalize(item)}</span></button>`)
+      ${(["library", "queue", "playlists", "chat"] as ControllerView[])
+        .map((item) => `<button data-action="view" data-view="${item}" aria-current="${view === item ? "page" : "false"}">${icon(item === "library" ? "library" : item === "queue" ? "queue" : item === "chat" ? "chat" : "playlist")}<span>${capitalize(item)}</span></button>`)
         .join("")}
     </nav>
-    <div class="controller-view">${view === "library" ? renderLibrary(state) : view === "queue" ? renderQueue(state) : renderPlaylists(state)}</div>
+    <div class="controller-view">${view === "library" ? renderLibrary(state) : view === "queue" ? renderQueue(state) : view === "chat" ? renderChat(state) : renderPlaylists(state)}</div>
   </section>`;
+}
+
+function renderChat(state: AppSnapshot): string {
+  const messages = state.chatMessages ?? [];
+  return `<section class="chat-panel companion-chat" data-testid="remote-chat">
+    <div class="controller-view-header"><div><h2>Chat</h2><span>Shared with the Zuradio computer · latest 20 retained</span></div></div>
+    <div class="chat-log" data-chat-log role="log" aria-live="polite" aria-relevant="additions text">
+      ${messages.length ? messages.map((entry) => renderChatMessage(entry)).join("") : `<div class="empty">No messages yet. Say hello to the person at the Zuradio computer.</div>`}
+    </div>
+    <form class="chat-compose" data-chat-form>
+      <label for="remote-chat-message">Message</label>
+      <div><textarea id="remote-chat-message" name="message" data-chat-input data-testid="remote-chat-input" rows="2" maxlength="300" required placeholder="Write a message to the Zuradio computer">${escapeHtml(chatDraft)}</textarea><button class="primary" data-testid="remote-chat-send">Send</button></div>
+      <p>Control access can exchange text. Messages cannot run commands or upload files.</p>
+    </form>
+  </section>`;
+}
+
+function renderChatMessage(entry: ChatMessage): string {
+  const sender = entry.sender === "local" ? "Zuradio computer" : "You · remote browser";
+  return `<article class="chat-message${entry.sender === "remote" ? " is-own" : ""}" data-testid="chat-message" data-sender="${entry.sender}">
+    <div><strong>${sender}</strong><time datetime="${new Date(entry.sentAtMs).toISOString()}">${escapeHtml(formatChatTime(entry.sentAtMs))}</time></div>
+    <p>${escapeHtml(entry.text)}</p>
+  </article>`;
 }
 
 function renderLibrary(state: AppSnapshot): string {
@@ -679,6 +734,19 @@ function isReadyConnectionStatus(value: string): boolean {
 function formatTime(milliseconds: number): string {
   const seconds = Math.max(0, Math.floor(milliseconds / 1000));
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
+}
+
+function formatChatTime(timestamp: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(new Date(timestamp));
+}
+
+function scrollChatToLatest(): void {
+  if (view !== "chat") return;
+  const log = root.querySelector<HTMLElement>("[data-chat-log]");
+  if (log) log.scrollTop = log.scrollHeight;
 }
 
 function formatTrustedUntil(timestamp: number): string {

@@ -11,7 +11,7 @@ runs first; it is an additional requirement, not a substitute for this gate.
 
 Low latency, fast connection establishment, and immediate UI feedback are absolute Zuradio product priorities. Within the security, correctness, and data-integrity boundaries, every implementation must minimize user-perceived waiting and avoid serial network work that can safely run in parallel.
 
-- Remote-path changes must measure password-submit-to-ready latency and browser-command-to-laptop-acknowledgement latency through the real VDO.Ninja path. The qualification suite enforces less than 15 seconds to establish listener or controller access and less than 2 seconds for an acknowledged control command. Treat these as regression ceilings, not performance targets; optimize for the lowest stable measured values.
+- Remote-path changes must measure password-submit-to-ready latency and browser-command-to-laptop-acknowledgement latency through the real VDO.Ninja path. The qualification suite enforces less than 15 seconds to establish listener or controller access and less than 2 seconds for an acknowledged control command, including chat posts. Treat these as regression ceilings, not performance targets; optimize for the lowest stable measured values.
 - Keep player commands on the direct ordered WebRTC data channel. Do not add polling, fixed sleeps, proxy round trips, media uploads, or page reloads to an interactive command path.
 - Run independent setup work concurrently where safe. The authenticated control surface must not wait for optional audio-analysis, visualizer, or secondary listener setup.
 - Preserve the 210,000-round password proof, role boundaries, replay protection, and no-music-on-GitHub-Pages rule. Performance work may not weaken authentication or authorization.
@@ -22,6 +22,9 @@ Low latency, fast connection establishment, and immediate UI feedback are absolu
 ## Required completion sequence
 
 1. Add or update a Playwright scenario under `web/tests/e2e/` for every changed user workflow, regression, permission boundary, or responsive UI state. Assert the outcome a user experiences, not merely an HTTP response or implementation detail.
+   Chat changes must prove remote-to-local and local-to-remote publication,
+   Rust-derived sender identity, Listener/Upload exclusion, local-only deletion/clearing,
+   persistence bounds, HTML-safe rendering, and the command latency ceiling.
 2. Build the optimized Rust daemon and production web assets. The repository
    gate scripts also rebuild these bytes themselves; a merely existing release
    executable or `web/dist` directory is not freshness evidence.

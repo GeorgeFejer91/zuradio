@@ -56,7 +56,9 @@ does not dispatch any player command.
 
 ## One authority, many adapters
 
-All mutations enter one serial Rust command handler. A command has an ID,
+All mutations enter one serial Rust command handler. This includes the bounded
+text chat shared by the laptop and authenticated Control browsers; chat text is
+data, never executable input. A command has an ID,
 expected state revision, actor scope, and a closed action enum. Accepted commands
 advance the revision and emit canonical state. Duplicate command IDs are safe to
 retry. Stale writes receive a conflict plus a fresh snapshot.
@@ -76,7 +78,10 @@ never name a Rust function, executable, filesystem path, URL, or DOM operation.
 
 The persistent model covers tracks, artists, albums, playlists and ordered
 playlist entries, favorites, play history, the active queue, shuffle/repeat
-configuration, and last-known player state. Rebuildable scanner data is kept
+configuration, last-known player state, and the latest 20 chat messages. Chat
+sender labels are assigned from the Rust-authorized actor role, each message is
+bounded to 300 characters and 320 UTF-8 bytes, and only the local operator can
+delete messages or clear the board. Rebuildable scanner data is kept
 separate from user-authored state. Canonical client snapshots contain only
 currently playable tracks; unavailable database rows remain internal so saved
 playlist and history references are not erased when a mount moves or a managed
@@ -160,7 +165,9 @@ increasing sequence. The browser sends an explicit goodbye when it disconnects;
 transport UUID reuse cannot revoke or impersonate a newly authenticated grant.
 Upload grants cannot
 control or listen; listener grants cannot inspect the library or mutate it;
-only listen/control receive the live audio route.
+only listen/control receive the live audio route. Chat history and posting are
+part of authenticated Control state; Listen remains read-only and Upload remains
+restricted to the file-transfer protocol.
 
 The first successful password proof can request a 24-hour trusted-browser
 credential. Rust signs a device-ID and expiry claim with a persistent local

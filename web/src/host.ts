@@ -7,6 +7,7 @@ import type {
   Action,
   AppSnapshot,
   BroadcastSession,
+  ChatMessage,
   Playlist,
   RemoteUploadResponse,
   Track,
@@ -15,7 +16,7 @@ import type {
 import { HostBroadcastBridge } from "./vdo";
 import { renderSoundVisualizer, SvgSoundVisualizer } from "./visualizer";
 
-type View = "library" | "albums" | "artists" | "playlists" | "favorites" | "history" | "broadcast";
+type View = "library" | "albums" | "artists" | "playlists" | "favorites" | "history" | "chat" | "broadcast";
 
 const rootElement = document.querySelector<HTMLDivElement>("#app");
 if (!rootElement) throw new Error("Missing app root");
@@ -26,6 +27,7 @@ const api = new ZuradioApi();
 let snapshot: AppSnapshot | null = null;
 let view: View = "library";
 let search = "";
+let chatDraft = "";
 let selectedPlaylistId: string | null = null;
 let editingTrackId: string | null = null;
 let broadcastSession: BroadcastSession | null = null;
@@ -108,6 +110,10 @@ root.addEventListener("click", (event) => {
 root.addEventListener("submit", (event) => {
   const form = event.target as HTMLFormElement;
   event.preventDefault();
+  if (form.matches("[data-chat-form]")) {
+    void postChat(form);
+    return;
+  }
   if (form.matches("[data-metadata-form]")) {
     void saveMetadata(form);
     return;
@@ -119,10 +125,12 @@ root.addEventListener("submit", (event) => {
 });
 
 root.addEventListener("input", (event) => {
-  const target = event.target as HTMLInputElement;
+  const target = event.target as HTMLInputElement | HTMLTextAreaElement;
   if (target.matches("[data-search]")) {
     search = target.value;
     render();
+  } else if (target.matches("[data-chat-input]")) {
+    chatDraft = target.value;
   } else if (target.matches("[data-seek]")) {
     positionMs = Number(target.value);
     updateProgress();
@@ -339,6 +347,17 @@ async function handleClick(target: HTMLElement): Promise<void> {
     });
     return;
   }
+  if (action === "clear-chat") {
+    if (window.confirm("Clear all chat messages from this Zuradio library?")) {
+      await perform({ kind: "chat_clear" }, false);
+    }
+    return;
+  }
+  if (action === "delete-chat-message") {
+    const messageId = target.dataset.messageId;
+    if (messageId) await perform({ kind: "chat_delete", messageId }, false);
+    return;
+  }
 
   const trackId = target.dataset.trackId;
   const playlistId = target.dataset.playlistId;
@@ -507,6 +526,15 @@ async function saveMetadata(form: HTMLFormElement): Promise<void> {
   render();
 }
 
+async function postChat(form: HTMLFormElement): Promise<void> {
+  const input = form.elements.namedItem("message") as HTMLTextAreaElement;
+  const text = input.value.trim();
+  if (!text) return;
+  await perform({ kind: "chat_post", text }, false);
+  chatDraft = "";
+  render();
+}
+
 async function perform(action: Action, unlock = true): Promise<void> {
   await task(async () => {
     if (unlock && (action.kind === "play" || action.kind === "play_track")) await audio.unlock();
@@ -578,6 +606,13 @@ function render(): void {
     root.innerHTML = `<main class="content"><p class="muted">Opening Zuradio…</p></main>`;
     return;
   }
+  const activeChatInput = document.activeElement instanceof HTMLTextAreaElement
+    && document.activeElement.matches("[data-chat-input]")
+    ? document.activeElement
+    : null;
+  const chatSelection = activeChatInput
+    ? [activeChatInput.selectionStart, activeChatInput.selectionEnd] as const
+    : null;
   root.innerHTML = `
     <div class="shell view-${view}" aria-busy="${busy}">
       ${renderSidebar(snapshot)}
@@ -598,6 +633,12 @@ function render(): void {
   `;
   visualizer.mount(root.querySelector<SVGSVGElement>("[data-testid='host-visualizer']"), audio);
   updateProgress();
+  scrollChatToLatest();
+  if (activeChatInput) {
+    const input = root.querySelector<HTMLTextAreaElement>("[data-chat-input]");
+    input?.focus();
+    if (input && chatSelection) input.setSelectionRange(chatSelection[0], chatSelection[1]);
+  }
 }
 
 function renderSidebar(state: AppSnapshot): string {
@@ -609,6 +650,7 @@ function renderSidebar(state: AppSnapshot): string {
     ["playlists", "Playlists", state.playlists.length, "playlist"],
     ["favorites", "Favorites", state.favorites.length, "heart"],
     ["history", "History", state.history.length, "history"],
+    ["chat", "Chat", chatMessages(state).length, "chat"],
     ["broadcast", "Broadcast", broadcastSession ? "On" : "Off", "broadcast"],
   ];
   return `<aside class="sidebar">
@@ -648,6 +690,8 @@ function renderContent(state: AppSnapshot): string {
       return renderPlaylists(state);
     case "history":
       return renderHistory(state);
+    case "chat":
+      return renderChat(state);
     case "broadcast":
       return renderBroadcast();
   }
@@ -772,6 +816,30 @@ function renderHistory(state: AppSnapshot): string {
   return renderTrackSection("Recently played", tracks, state);
 }
 
+function renderChat(state: AppSnapshot): string {
+  const messages = chatMessages(state);
+  return `<section class="chat-panel" data-testid="host-chat">
+    <div class="section-header library-header chat-header"><div><h2>Chat</h2><p class="muted">Messages shared with authenticated remote Control browsers · latest 20 retained</p></div>${messages.length ? `<button class="danger" data-action="clear-chat" data-testid="clear-chat" ${disabled()}>Clear chat</button>` : ""}</div>
+    <div class="chat-log" data-chat-log role="log" aria-live="polite" aria-relevant="additions text">
+      ${messages.length ? messages.map((entry) => renderChatMessage(entry, "local")).join("") : `<div class="empty">No messages yet. Open Control mode in the Web Companion to chat with this computer.</div>`}
+    </div>
+    <form class="chat-compose" data-chat-form>
+      <label for="host-chat-message">Message</label>
+      <div><textarea id="host-chat-message" name="message" data-chat-input data-testid="host-chat-input" rows="2" maxlength="300" required placeholder="Write a message to the connected remote browser">${escapeHtml(chatDraft)}</textarea><button class="primary" data-testid="host-chat-send" ${disabled()}>Send</button></div>
+      <p>Chat carries text only. It cannot run commands or transfer files.</p>
+    </form>
+  </section>`;
+}
+
+function renderChatMessage(entry: ChatMessage, perspective: "local" | "remote"): string {
+  const own = entry.sender === perspective;
+  const sender = entry.sender === "local" ? "This computer" : "Remote browser";
+  return `<article class="chat-message${own ? " is-own" : ""}" data-testid="chat-message" data-sender="${entry.sender}">
+    <div><strong>${sender}</strong><span><time datetime="${new Date(entry.sentAtMs).toISOString()}">${escapeHtml(formatChatTime(entry.sentAtMs))}</time><button data-action="delete-chat-message" data-message-id="${escapeAttribute(entry.id)}" aria-label="Delete message" title="Delete message">${icon("close")}</button></span></div>
+    <p>${escapeHtml(entry.text)}</p>
+  </article>`;
+}
+
 function renderBroadcast(): string {
   if (!broadcastSession) {
     return `<section class="broadcast-panel">
@@ -789,7 +857,7 @@ function renderBroadcast(): string {
     ${autoBroadcast ? "" : `<button class="danger" data-action="stop-broadcast" data-testid="stop-broadcast" ${disabled()}>Stop broadcast</button>`}
     <div class="access-modes" data-testid="access-modes">
       <div><strong>Listen</strong><span>Live audio and current track</span></div>
-      <div><strong>Control</strong><span>Player, queue, library and playlists</span></div>
+      <div><strong>Control</strong><span>Player, chat, queue, library and playlists</span></div>
       <div><strong>Upload</strong><span>Send folders or music files to this laptop</span></div>
     </div>
   </section>`;
@@ -888,6 +956,16 @@ function filteredTracks(state: AppSnapshot): Track[] {
 
 function availableTracks(state: AppSnapshot): Track[] {
   return state.tracks.filter((track) => track.available);
+}
+
+function chatMessages(state: AppSnapshot): ChatMessage[] {
+  return state.chatMessages ?? [];
+}
+
+function scrollChatToLatest(): void {
+  if (view !== "chat") return;
+  const log = root.querySelector<HTMLElement>("[data-chat-log]");
+  if (log) log.scrollTop = log.scrollHeight;
 }
 
 type TransferPhase = "receiving" | "cataloguing" | "finalizing" | "complete" | "interrupted";
@@ -1144,6 +1222,13 @@ function formatTime(milliseconds: number): string {
   const minutes = Math.floor(totalSeconds / 60);
   const seconds = totalSeconds % 60;
   return `${minutes}:${String(seconds).padStart(2, "0")}`;
+}
+
+function formatChatTime(timestamp: number): string {
+  return new Intl.DateTimeFormat(undefined, {
+    dateStyle: "short",
+    timeStyle: "short",
+  }).format(new Date(timestamp));
 }
 
 function unique(values: string[]): string[] {

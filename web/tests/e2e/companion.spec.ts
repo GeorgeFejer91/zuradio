@@ -53,6 +53,7 @@ test("streams from the laptop while enforcing listener and controller roles", as
     const listenerConnectMs = Date.now() - listenerConnectStarted;
     expect(listenerConnectMs, "listener password-to-live latency").toBeLessThan(MAX_CONNECT_LATENCY_MS);
     await expect(listener.getByText(/Listen access is read-only/)).toBeVisible();
+    await expect(listener.getByRole("button", { name: "Chat", exact: true })).toHaveCount(0);
     await expect(listener.getByTestId("companion-visualizer")).toBeVisible();
     await expect(listener.getByTestId("companion-title")).toHaveText(firstTitle, { timeout: 20_000 });
     await listener.waitForFunction(() => {
@@ -130,6 +131,7 @@ test("streams from the laptop while enforcing listener and controller roles", as
     expect(switchToUploadMs, "control-to-upload switch latency").toBeLessThan(MAX_CONNECT_LATENCY_MS);
     await expect(controller.getByTestId("switch-upload")).toHaveAttribute("aria-current", "page");
     await expect(controller.getByRole("heading", { name: "Add music to this laptop" })).toBeVisible();
+    await expect(controller.getByRole("button", { name: "Chat", exact: true })).toHaveCount(0);
     await expect(controller.getByRole("dialog")).toHaveCount(0);
     await controller.screenshot({ path: "test-results/mobile-upload-mode.png", fullPage: true });
 
@@ -142,6 +144,49 @@ test("streams from the laptop while enforcing listener and controller roles", as
     await expect(controller.getByTestId("switch-control")).toHaveAttribute("aria-current", "page");
     await expect(controller.getByLabel("Remote player controls")).toBeVisible();
     await expect(controller.getByRole("dialog")).toHaveCount(0);
+
+    await host.locator('[data-action="nav"][data-view="chat"]').click();
+    const clearExistingChat = host.getByTestId("clear-chat");
+    if (await clearExistingChat.isVisible()) {
+      host.once("dialog", (dialog) => dialog.accept());
+      await clearExistingChat.click();
+      await expect(host.getByTestId("chat-message")).toHaveCount(0);
+    }
+    await controller.getByRole("button", { name: "Chat", exact: true }).click();
+    await expect(controller.getByTestId("remote-chat")).toBeVisible();
+    const remoteMessage = `Remote hello ${Date.now()}`;
+    await controller.getByTestId("remote-chat-input").fill(remoteMessage);
+    const hostMuteForDraftTest = host.getByRole("button", { name: "Mute", exact: true });
+    await hostMuteForDraftTest.click();
+    await expect(controller.getByTestId("remote-chat-input")).toHaveValue(remoteMessage);
+    await expect(controller.getByTestId("remote-chat-input")).toBeFocused();
+    await host.getByRole("button", { name: "Unmute", exact: true }).click();
+    await expect(controller.getByTestId("remote-chat-input")).toHaveValue(remoteMessage);
+    const chatCommandStarted = Date.now();
+    await controller.getByTestId("remote-chat-send").click();
+    await expect(host.getByTestId("host-chat").getByText(remoteMessage, { exact: true })).toBeVisible();
+    await expect(controller.getByTestId("remote-chat").getByText(remoteMessage, { exact: true })).toBeVisible();
+    expect(Date.now() - chatCommandStarted, "remote chat acknowledgement latency").toBeLessThan(MAX_COMMAND_RTT_MS);
+    await expect(host.locator('[data-testid="chat-message"][data-sender="remote"]')).toContainText(remoteMessage);
+
+    const markupMessage = `<img src=x onerror="window.__zuradioChatExecuted=true">`;
+    await controller.getByTestId("remote-chat-input").fill(markupMessage);
+    await controller.getByTestId("remote-chat-send").click();
+    await expect(host.getByTestId("host-chat").getByText(markupMessage, { exact: true })).toBeVisible();
+    await expect(host.getByTestId("host-chat").locator("img")).toHaveCount(0);
+    expect(await host.evaluate(() => (window as Window & { __zuradioChatExecuted?: boolean }).__zuradioChatExecuted)).toBeUndefined();
+
+    const localMessage = `Laptop reply ${Date.now()}`;
+    await host.getByTestId("host-chat-input").fill(localMessage);
+    await host.getByTestId("host-chat-send").click();
+    await expect(controller.locator('[data-testid="chat-message"][data-sender="local"]')).toContainText(localMessage);
+    await controller.screenshot({ path: "test-results/mobile-controller-chat.png", fullPage: true });
+
+    host.once("dialog", (dialog) => dialog.accept());
+    await host.getByTestId("clear-chat").click();
+    await expect(host.getByTestId("chat-message")).toHaveCount(0);
+    await expect(controller.getByTestId("chat-message")).toHaveCount(0);
+    await controller.getByRole("button", { name: "Library", exact: true }).click();
 
     const remotePlayPause = controller.getByTestId("remote-play-pause");
     if ((await remotePlayPause.textContent()) === "Play") {

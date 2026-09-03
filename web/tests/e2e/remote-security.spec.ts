@@ -17,6 +17,7 @@ interface BroadcastSession {
 interface Snapshot {
   revision: number;
   player: { volume: number };
+  chatMessages: Array<{ sender: "local" | "remote"; text: string }>;
 }
 
 const runtimePath = process.env.ZURADIO_RUNTIME;
@@ -161,11 +162,55 @@ test("binds controller grants to proof, broadcast, peer, and monotonic sequence"
     });
     expect(restored.status).toBe(200);
 
+    const beforeChat = await get<Snapshot>(page, "/api/v1/snapshot");
+    const chatText = `sender binding ${randomUUID()}`;
+    const postedChat = await post(page, "/api/v1/remote/action", {
+      ...command,
+      sequence: 3,
+      request: {
+        ...command.request,
+        commandId: randomUUID(),
+        expectedRevision: beforeChat.revision,
+        actor: { role: "local", peerId: "spoofed-local" },
+        action: { kind: "chat_post", text: chatText },
+      },
+    });
+    expect(postedChat.status).toBe(200);
+    const afterChat = await get<Snapshot>(page, "/api/v1/snapshot");
+    expect(afterChat.chatMessages.at(-1)).toEqual({
+      sender: "remote",
+      text: chatText,
+      id: expect.any(String),
+      sentAtMs: expect.any(Number),
+    });
+
+    const forbiddenClear = await post(page, "/api/v1/remote/action", {
+      ...command,
+      sequence: 4,
+      request: {
+        ...command.request,
+        commandId: randomUUID(),
+        expectedRevision: afterChat.revision,
+        action: { kind: "chat_clear" },
+      },
+    });
+    expect(forbiddenClear.status).toBe(403);
+    expect((await get<Snapshot>(page, "/api/v1/snapshot")).chatMessages.at(-1)?.text).toBe(chatText);
+
+    const clearedChat = await post(page, "/api/v1/action", {
+      protocol: 1,
+      commandId: randomUUID(),
+      expectedRevision: afterChat.revision,
+      actor: { role: "controller", peerId: "spoofed" },
+      action: { kind: "chat_clear" },
+    });
+    expect(clearedChat.status).toBe(200);
+
     await post(page, "/api/v1/broadcast/stop", undefined);
     const revoked = await post(page, "/api/v1/remote/action", {
       ...command,
-      sequence: 3,
-      request: { ...command.request, commandId: randomUUID(), expectedRevision: current.revision + 1 },
+      sequence: 5,
+      request: { ...command.request, commandId: randomUUID(), expectedRevision: afterChat.revision + 1 },
     });
     expect(revoked.status).toBe(401);
   } finally {

@@ -2,6 +2,7 @@ export type IconName =
   | "album"
   | "artist"
   | "broadcast"
+  | "chat"
   | "chevronDown"
   | "chevronUp"
   | "close"
@@ -29,6 +30,7 @@ const paths: Record<IconName, string> = {
   album: '<rect x="3" y="3" width="18" height="18" rx="2"/><circle cx="12" cy="12" r="4"/><circle cx="12" cy="12" r="1"/>',
   artist: '<circle cx="12" cy="8" r="4"/><path d="M4.5 21a7.5 7.5 0 0 1 15 0"/>',
   broadcast: '<circle cx="12" cy="12" r="2"/><path d="M8.5 8.5a5 5 0 0 0 0 7M15.5 8.5a5 5 0 0 1 0 7M5 5a10 10 0 0 0 0 14M19 5a10 10 0 0 1 0 14"/>',
+  chat: '<path d="M4 5h16v11H9l-5 4V5Z"/><path d="M8 9h8M8 12h5"/>',
   chevronDown: '<path d="m7 10 5 5 5-5"/>',
   chevronUp: '<path d="m7 14 5-5 5 5"/>',
   close: '<path d="M6 6l12 12M18 6 6 18"/>',

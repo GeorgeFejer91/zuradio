@@ -6,13 +6,17 @@ use uuid::Uuid;
 use crate::catalog::{Catalog, scan_file, scan_music};
 use crate::model::StoredCommand;
 use crate::{
-    Action, ActionRequest, ActionResult, AppSnapshot, Artwork, CoreError, HistoryEntry,
-    PlaybackStatus, Playlist, RecognitionStatus, RepeatMode, Role, StoredState, TrackRecognition,
+    Action, ActionRequest, ActionResult, AppSnapshot, Artwork, ChatMessage, ChatSender, CoreError,
+    HistoryEntry, PlaybackStatus, Playlist, RecognitionStatus, RepeatMode, Role, StoredState,
+    TrackRecognition,
 };
 
 const PROTOCOL_VERSION: u16 = 1;
 const MAX_COMMAND_CACHE: usize = 256;
 const MAX_HISTORY: usize = 500;
+const MAX_CHAT_MESSAGES: usize = 20;
+const MAX_CHAT_MESSAGE_CHARS: usize = 300;
+const MAX_CHAT_MESSAGE_BYTES: usize = 320;
 
 #[derive(Debug)]
 pub struct ZuradioCore {
@@ -58,6 +62,7 @@ impl ZuradioCore {
             playlists: self.state.playlists.clone(),
             favorites: self.state.favorites.clone(),
             history: self.state.history.clone(),
+            chat_messages: self.state.chat_messages.clone(),
             player: self.state.player.clone(),
         })
     }
@@ -187,7 +192,10 @@ impl ZuradioCore {
         if role == Role::Controller
             && matches!(
                 action,
-                Action::ReportPlayback { .. } | Action::EditTrackMetadata { .. }
+                Action::ReportPlayback { .. }
+                    | Action::EditTrackMetadata { .. }
+                    | Action::ChatDelete { .. }
+                    | Action::ChatClear
             )
         {
             return Err(CoreError::Forbidden);
@@ -229,6 +237,9 @@ impl ZuradioCore {
                 to,
             } => self.playlist_move(&playlist_id, from, to)?,
             Action::FavoriteSet { track_id, favorite } => self.favorite_set(&track_id, favorite)?,
+            Action::ChatPost { text } => self.chat_post(&text, role)?,
+            Action::ChatDelete { message_id } => self.chat_delete(&message_id)?,
+            Action::ChatClear => self.state.chat_messages.clear(),
             Action::EditTrackMetadata {
                 track_id,
                 title,
@@ -307,6 +318,52 @@ impl ZuradioCore {
         self.state.player.current_track_id = None;
         self.state.player.status = PlaybackStatus::Stopped;
         self.state.player.position_ms = 0;
+    }
+
+    fn chat_post(&mut self, text: &str, role: Role) -> Result<(), CoreError> {
+        let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+        let text = normalized.trim();
+        if text.is_empty()
+            || text.chars().count() > MAX_CHAT_MESSAGE_CHARS
+            || text.len() > MAX_CHAT_MESSAGE_BYTES
+            || text
+                .chars()
+                .any(|character| character.is_control() && character != '\n' && character != '\t')
+        {
+            return Err(CoreError::InvalidInput(
+                "chat messages must contain 1 to 300 characters and at most 320 UTF-8 bytes".into(),
+            ));
+        }
+        let sender = match role {
+            Role::Local => ChatSender::Local,
+            Role::Controller => ChatSender::Remote,
+            Role::Listener => return Err(CoreError::Forbidden),
+        };
+        self.state.chat_messages.push(ChatMessage {
+            id: Uuid::new_v4().to_string(),
+            sender,
+            text: text.to_owned(),
+            sent_at_ms: now_ms(),
+        });
+        if self.state.chat_messages.len() > MAX_CHAT_MESSAGES {
+            let excess = self.state.chat_messages.len() - MAX_CHAT_MESSAGES;
+            self.state.chat_messages.drain(0..excess);
+        }
+        Ok(())
+    }
+
+    fn chat_delete(&mut self, message_id: &str) -> Result<(), CoreError> {
+        if Uuid::parse_str(message_id).is_err() {
+            return Err(CoreError::InvalidInput("invalid chat message ID".into()));
+        }
+        let before = self.state.chat_messages.len();
+        self.state
+            .chat_messages
+            .retain(|message| message.id != message_id);
+        if self.state.chat_messages.len() == before {
+            return Err(CoreError::NotFound("chat message not found".into()));
+        }
+        Ok(())
     }
 
     fn playlist_rename(&mut self, id: &str, name: &str) -> Result<(), CoreError> {
@@ -730,7 +787,7 @@ mod tests {
     use tempfile::tempdir;
 
     use super::*;
-    use crate::Actor;
+    use crate::{Actor, ChatSender};
 
     fn request(revision: u64, action: Action) -> ActionRequest {
         ActionRequest {
@@ -890,6 +947,122 @@ mod tests {
         let second = core.execute(command)?;
         assert_eq!(first, second);
         assert_eq!(core.snapshot()?.playlists.len(), 1);
+        Ok(())
+    }
+
+    #[test]
+    fn chat_persists_sender_identity_and_is_bounded() -> Result<(), Box<dyn std::error::Error>> {
+        let directory = tempdir()?;
+        let database = directory.path().join("catalog.sqlite3");
+        {
+            let mut core = ZuradioCore::open(&database)?;
+            core.execute(request(
+                core.snapshot()?.revision,
+                Action::ChatPost {
+                    text: "  Message from this computer  ".into(),
+                },
+            ))?;
+            let mut remote = request(
+                core.snapshot()?.revision,
+                Action::ChatPost {
+                    text: "Message from the browser".into(),
+                },
+            );
+            remote.actor = Actor {
+                role: Role::Controller,
+                peer_id: Some("browser-controller".into()),
+            };
+            core.execute(remote)?;
+            for index in 0..MAX_CHAT_MESSAGES {
+                core.execute(request(
+                    core.snapshot()?.revision,
+                    Action::ChatPost {
+                        text: format!("bounded message {index}"),
+                    },
+                ))?;
+            }
+            let snapshot = core.snapshot()?;
+            assert_eq!(snapshot.chat_messages.len(), MAX_CHAT_MESSAGES);
+            assert_eq!(snapshot.chat_messages[0].text, "bounded message 0");
+        }
+
+        let reopened = ZuradioCore::open(&database)?.snapshot()?;
+        assert_eq!(reopened.chat_messages.len(), MAX_CHAT_MESSAGES);
+        assert_eq!(
+            reopened.chat_messages.last().map(|entry| entry.sender),
+            Some(ChatSender::Local)
+        );
+        Ok(())
+    }
+
+    #[test]
+    fn chat_enforces_content_and_clear_authorization() -> Result<(), CoreError> {
+        let mut core = ZuradioCore::in_memory()?;
+        let revision = core.snapshot()?.revision;
+        assert!(matches!(
+            core.execute(request(
+                revision,
+                Action::ChatPost {
+                    text: "\u{0000}".into(),
+                },
+            )),
+            Err(CoreError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            core.execute(request(
+                revision,
+                Action::ChatPost {
+                    text: "x".repeat(MAX_CHAT_MESSAGE_CHARS + 1),
+                },
+            )),
+            Err(CoreError::InvalidInput(_))
+        ));
+
+        core.execute(request(
+            revision,
+            Action::ChatPost {
+                text: "keep me".into(),
+            },
+        ))?;
+        let message_id = core.snapshot()?.chat_messages[0].id.clone();
+        let mut remote_delete = request(
+            core.snapshot()?.revision,
+            Action::ChatDelete {
+                message_id: message_id.clone(),
+            },
+        );
+        remote_delete.actor = Actor {
+            role: Role::Controller,
+            peer_id: Some("browser-controller".into()),
+        };
+        assert!(matches!(
+            core.execute(remote_delete),
+            Err(CoreError::Forbidden)
+        ));
+        let mut remote_clear = request(core.snapshot()?.revision, Action::ChatClear);
+        remote_clear.actor = Actor {
+            role: Role::Controller,
+            peer_id: Some("browser-controller".into()),
+        };
+        assert!(matches!(
+            core.execute(remote_clear),
+            Err(CoreError::Forbidden)
+        ));
+        assert_eq!(core.snapshot()?.chat_messages.len(), 1);
+
+        core.execute(request(
+            core.snapshot()?.revision,
+            Action::ChatDelete { message_id },
+        ))?;
+        assert!(core.snapshot()?.chat_messages.is_empty());
+        core.execute(request(
+            core.snapshot()?.revision,
+            Action::ChatPost {
+                text: "clear me".into(),
+            },
+        ))?;
+        core.execute(request(core.snapshot()?.revision, Action::ChatClear))?;
+        assert!(core.snapshot()?.chat_messages.is_empty());
         Ok(())
     }
 

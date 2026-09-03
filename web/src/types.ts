@@ -44,6 +44,15 @@ export interface HistoryEntry {
   playedAtMs: number;
 }
 
+export type ChatSender = "local" | "remote";
+
+export interface ChatMessage {
+  id: string;
+  sender: ChatSender;
+  text: string;
+  sentAtMs: number;
+}
+
 export interface PlayerState {
   status: PlaybackStatus;
   currentTrackId: string | null;
@@ -65,6 +74,7 @@ export interface AppSnapshot {
   playlists: Playlist[];
   favorites: string[];
   history: HistoryEntry[];
+  chatMessages?: ChatMessage[];
   player: PlayerState;
 }
 
@@ -91,6 +101,9 @@ export type Action =
   | { kind: "playlist_remove"; playlistId: string; index: number }
   | { kind: "playlist_move"; playlistId: string; from: number; to: number }
   | { kind: "favorite_set"; trackId: string; favorite: boolean }
+  | { kind: "chat_post"; text: string }
+  | { kind: "chat_delete"; messageId: string }
+  | { kind: "chat_clear" }
   | {
       kind: "edit_track_metadata";
       trackId: string;

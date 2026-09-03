@@ -80,6 +80,7 @@ const browser = await chromium.launch({
 });
 const errors = [];
 let playbackRestored = false;
+let verificationChatMessageId = null;
 
 try {
   const listenerContext = await browser.newContext({ viewport: { width: 390, height: 844 } });
@@ -93,6 +94,9 @@ try {
   await listener.getByText("Listening live", { exact: true }).waitFor({ timeout: 45_000 });
   const listenerConnectMs = Math.round(performance.now() - listenerStarted);
   assertBelow("listener password-to-live", listenerConnectMs, maxConnectMs);
+  if ((await listener.getByRole("button", { name: "Chat", exact: true }).count()) !== 0) {
+    throw new Error("Listen mode exposed the private chat surface");
+  }
   await listener.waitForFunction(() => {
     const audio = document.querySelector('audio[aria-label="Live Zuradio audio"]');
     return Boolean(audio?.srcObject && audio.srcObject.getAudioTracks().length === 1);
@@ -123,6 +127,9 @@ try {
     throw new Error("Switching to upload unexpectedly requested the Zuradio password");
   }
   await controller.getByRole("heading", { name: "Add music to this laptop" }).waitFor();
+  if ((await controller.getByRole("button", { name: "Chat", exact: true }).count()) !== 0) {
+    throw new Error("Upload mode exposed the Control chat surface");
+  }
 
   const switchToControlStarted = performance.now();
   await controller.getByTestId("switch-control").click();
@@ -133,6 +140,27 @@ try {
     throw new Error("Switching back to control unexpectedly requested the Zuradio password");
   }
   await controller.getByLabel("Remote player controls").waitFor();
+
+  await host.locator('[data-action="nav"][data-view="chat"]').click();
+  await controller.getByRole("button", { name: "Chat", exact: true }).click();
+  const chatText = `Installed public chat verification ${Date.now()}`;
+  await controller.getByTestId("remote-chat-input").fill(chatText);
+  const chatCommandStarted = performance.now();
+  await controller.getByTestId("remote-chat-send").click();
+  await host.getByTestId("host-chat").getByText(chatText, { exact: true }).waitFor();
+  await controller.getByTestId("remote-chat").getByText(chatText, { exact: true }).waitFor();
+  const chatCommandRttMs = Math.round(performance.now() - chatCommandStarted);
+  assertBelow("remote chat acknowledgement", chatCommandRttMs, maxCommandMs);
+  verificationChatMessageId = await host.evaluate(async (text) => {
+    const snapshot = await fetch("/api/v1/snapshot", { cache: "no-store" }).then((response) => response.json());
+    return snapshot.chatMessages?.find((message) => message.text === text)?.id ?? null;
+  }, chatText);
+  if (!verificationChatMessageId) throw new Error("Installed Rust authority did not persist the public chat message");
+  await localAction(host, { kind: "chat_delete", messageId: verificationChatMessageId });
+  verificationChatMessageId = null;
+  await host.getByTestId("host-chat").getByText(chatText, { exact: true }).waitFor({ state: "detached" });
+  await controller.getByTestId("remote-chat").getByText(chatText, { exact: true }).waitFor({ state: "detached" });
+  await controller.getByRole("button", { name: "Library", exact: true }).click();
 
   await controller.getByRole("searchbox", { name: "Search library" }).fill("Arpent");
   await controller.getByRole("button", { name: "Play Arpent" }).click();
@@ -203,6 +231,7 @@ try {
     switchToUploadMs,
     switchToControlMs,
     commandRttMs,
+    chatCommandRttMs,
     trustedConnectMs,
     trustedCommandRttMs,
     beaconRecoveryMs,
@@ -210,6 +239,9 @@ try {
     streamTrackReceived: true,
   }, null, 2)}\n`);
 } finally {
+  if (verificationChatMessageId) {
+    await localAction(host, { kind: "chat_delete", messageId: verificationChatMessageId }).catch(() => undefined);
+  }
   if (!playbackRestored) await restorePlayback(host, hostState.snapshot.player).catch(() => undefined);
   await browser.close();
   await hostBrowser.close();
@@ -242,7 +274,7 @@ async function localAction(host, action) {
         action: nextAction,
       }),
     });
-    if (!response.ok) throw new Error(`Could not restore installed playback (${response.status})`);
+    if (!response.ok) throw new Error(`Installed local action failed (${response.status})`);
   }, action);
 }
 

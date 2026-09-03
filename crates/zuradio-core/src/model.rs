@@ -114,6 +114,22 @@ pub struct HistoryEntry {
     pub played_at_ms: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ChatSender {
+    Local,
+    Remote,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct ChatMessage {
+    pub id: String,
+    pub sender: ChatSender,
+    pub text: String,
+    pub sent_at_ms: i64,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct StoredCommand {
@@ -129,6 +145,8 @@ pub struct StoredState {
     pub playlists: Vec<Playlist>,
     pub favorites: Vec<String>,
     pub history: Vec<HistoryEntry>,
+    #[serde(default)]
+    pub chat_messages: Vec<ChatMessage>,
     pub commands: Vec<StoredCommand>,
 }
 
@@ -140,6 +158,7 @@ impl Default for StoredState {
             playlists: Vec::new(),
             favorites: Vec::new(),
             history: Vec::new(),
+            chat_messages: Vec::new(),
             commands: Vec::new(),
         }
     }
@@ -241,6 +260,13 @@ pub enum Action {
         track_id: String,
         favorite: bool,
     },
+    ChatPost {
+        text: String,
+    },
+    ChatDelete {
+        message_id: String,
+    },
+    ChatClear,
     EditTrackMetadata {
         track_id: String,
         title: String,
@@ -285,5 +311,7 @@ pub struct AppSnapshot {
     pub playlists: Vec<Playlist>,
     pub favorites: Vec<String>,
     pub history: Vec<HistoryEntry>,
+    #[serde(default)]
+    pub chat_messages: Vec<ChatMessage>,
     pub player: PlayerState,
 }

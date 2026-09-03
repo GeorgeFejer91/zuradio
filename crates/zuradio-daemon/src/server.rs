@@ -918,6 +918,8 @@ async fn remote_verify(
             "player:control",
             "queue:write",
             "playlists:write",
+            "chat:read",
+            "chat:write",
         ],
         RemoteMode::Upload => vec!["library:upload", "library:read"],
     };
