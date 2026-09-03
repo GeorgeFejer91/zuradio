@@ -28,6 +28,18 @@ forced-TURN, and endurance qualification remain release-channel gates.
   current catalogue entries reached a terminal acoustic-recognition state:
   five `recognized` and three legitimate `no_match`, with no pending,
   unavailable, or error result.
+- The deployed public companion passed against the installed eight-track app:
+  listener connection in 4,979 ms, controller connection in 2,896 ms,
+  control/upload switches in 2,914/2,926 ms, normal command acknowledgement in
+  309 ms, chat acknowledgement in 512 ms, trusted reconnect in 2,422 ms,
+  trusted command acknowledgement in 120 ms, automatic beacon recovery in 128
+  ms, and one received live audio track.
+- Terminating only the supervised host PID caused systemd to replace PID 506892
+  with PID 507154 and restore a non-null beacon. The replacement passed the
+  public companion again: listener 4,904 ms, controller 3,387 ms, chat 265 ms,
+  trusted command 168 ms, beacon recovery 87 ms, and one live audio track.
+  Stopping both user services made the old loopback authority unreachable;
+  both services remained enabled and returned active with an automatic beacon.
 
 ### 2026-09-03 transfer visibility, resume, and large-catalogue addendum
 
