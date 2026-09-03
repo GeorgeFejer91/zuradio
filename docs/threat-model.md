@@ -103,6 +103,8 @@ protocol. Direct Internet exposure of the loopback daemon is out of scope.
 - Real VDO.Ninja audio/data transport between independent host, listener, and
   controller Chromium contexts.
 - Listener UI immutability and controller player/queue/playlist behavior.
+- Authenticated Control chat in both directions, Rust-derived sender identity,
+  HTML-safe rendering, bounded persistence, and local-only deletion/clearing.
 - Companion-only Pages artifact inspection: no media files and no local media
   API reference.
 - Tauri v2 shell URL validation, zero-command capability, exact loopback

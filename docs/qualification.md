@@ -1,6 +1,6 @@
 # Zuradio release qualification
 
-Qualification dates: 2026-09-01 through 2026-09-02, Europe/Berlin.
+Qualification dates: 2026-09-01 through 2026-09-03, Europe/Berlin.
 
 ## Result
 
@@ -8,6 +8,33 @@ Zuradio is an installed Linux release candidate on this laptop: Rust service,
 complete CLI, dedicated Chromium WebRTC app window, least-privilege Tauri
 fallback, Debian package, AppImage, and public Web Companion. Native packages remain unsigned, and physical-phone,
 forced-TURN, and endurance qualification remain release-channel gates.
+
+### 2026-09-03 authenticated-chat addendum
+
+- Zuradio now includes a persistent text chat between the laptop UI and
+  authenticated Control browsers. Rust assigns local/remote sender identity,
+  retains the latest 20 bounded messages, permits Control clients to post, and
+  reserves individual deletion and full clearing for the local operator.
+  Listen and Upload modes expose no chat surface.
+- The live browser scenario proved remote-to-local and local-to-remote delivery,
+  inert rendering of HTML-like text, sender-role binding, local-only deletion,
+  draft/focus survival across concurrent player snapshots, and a sub-2-second
+  remote chat acknowledgement. The complete gate passed all 24 scenarios in
+  Chromium, Firefox, and WebKit in 3.7 minutes.
+- The repeated transfer benchmark remained byte-exact for 9,729,283 source
+  bytes: first catalogue publication in 2,146 ms, upload at 1,985,163 B/s,
+  download at 35,123,765 B/s, and two organized originals.
+- The deployed GitHub Pages companion passed against the installed five-track
+  app with listener connection in 3,926 ms, controller connection in 2,871 ms,
+  normal command acknowledgement in 295 ms, chat acknowledgement in 284 ms,
+  trusted reconnect in 2,946 ms, and trusted command acknowledgement in 146 ms.
+  Its uniquely identified verifier message was deleted without touching any
+  existing conversation.
+- Terminating only the supervised host's resolved PID caused systemd to replace
+  PID 451927 with PID 452145. The post-replacement public test again passed,
+  with chat acknowledgement in 283 ms and one live audio track. Stopping both
+  user services made the old loopback authority unreachable; both services
+  then returned active with a non-null password-discovery beacon.
 
 ### 2026-09-02 acoustic-recognition and transfer addendum
 

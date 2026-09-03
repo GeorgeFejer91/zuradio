@@ -148,7 +148,10 @@ try {
   const chatCommandStarted = performance.now();
   await controller.getByTestId("remote-chat-send").click();
   await host.getByTestId("host-chat").getByText(chatText, { exact: true }).waitFor();
-  await controller.getByTestId("remote-chat").getByText(chatText, { exact: true }).waitFor();
+  await controller.waitForFunction(
+    () => document.querySelector('[data-testid="remote-chat-input"]')?.value === "",
+  );
+  await controller.locator('[data-testid="chat-message"]').getByText(chatText, { exact: true }).waitFor();
   const chatCommandRttMs = Math.round(performance.now() - chatCommandStarted);
   assertBelow("remote chat acknowledgement", chatCommandRttMs, maxCommandMs);
   verificationChatMessageId = await host.evaluate(async (text) => {
@@ -159,7 +162,7 @@ try {
   await localAction(host, { kind: "chat_delete", messageId: verificationChatMessageId });
   verificationChatMessageId = null;
   await host.getByTestId("host-chat").getByText(chatText, { exact: true }).waitFor({ state: "detached" });
-  await controller.getByTestId("remote-chat").getByText(chatText, { exact: true }).waitFor({ state: "detached" });
+  await controller.locator('[data-testid="chat-message"]').getByText(chatText, { exact: true }).waitFor({ state: "detached" });
   await controller.getByRole("button", { name: "Library", exact: true }).click();
 
   await controller.getByRole("searchbox", { name: "Search library" }).fill("Arpent");
