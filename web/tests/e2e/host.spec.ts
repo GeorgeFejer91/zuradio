@@ -143,6 +143,7 @@ test("drives playback, queue, favorite, seek, volume, shuffle, repeat, and histo
 
   await rows.nth(0).getByRole("button", { name: "Add to favorites" }).click();
   await page.getByRole("button", { name: /Favorites/ }).click();
+  await expect(page.getByRole("heading", { name: "Favorites", exact: true })).toBeVisible();
   const favoriteRow = page.locator("[data-track-row]").filter({ hasText: "Nomadic Sunset" });
   await expect(favoriteRow).toHaveCount(1);
   if (!initiallyFavorite) {

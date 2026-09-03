@@ -103,7 +103,11 @@ const bridge = new HostBroadcastBridge({
 
 root.addEventListener("click", (event) => {
   const target = (event.target as HTMLElement).closest<HTMLElement>("[data-action]");
-  if (!target || busy) return;
+  if (!target) return;
+  const action = target.dataset.action;
+  const changesOnlyLocalView =
+    action !== undefined && ["nav", "group", "select-playlist", "open-playlist", "edit-track", "close-metadata"].includes(action);
+  if (busy && !changesOnlyLocalView) return;
   void handleClick(target);
 });
 
@@ -706,15 +710,15 @@ function renderTrack(track: Track, state: AppSnapshot): string {
   const favorite = state.favorites.includes(track.id);
   const playlist = selectedPlaylistId ? state.playlists.find((item) => item.id === selectedPlaylistId) : state.playlists[0];
   return `<li class="track-row" data-track-row="${escapeAttribute(track.id)}">
-    <button class="track-cover-button" data-action="play-track" data-track-id="${escapeAttribute(track.id)}" aria-label="Play ${escapeAttribute(track.title)}" title="Play">${renderCover(track, "track-cover")}<span class="track-play-overlay">${icon("play")}</span></button>
+    <button class="track-cover-button" data-action="play-track" data-track-id="${escapeAttribute(track.id)}" aria-label="Play ${escapeAttribute(track.title)}" title="Play" ${disabled()}>${renderCover(track, "track-cover")}<span class="track-play-overlay">${icon("play")}</span></button>
     <div class="track-title"><strong>${escapeHtml(track.title)}</strong><span>${escapeHtml(track.format.toUpperCase())}${track.year ? ` · ${track.year}` : ""}</span>${renderRecognitionLabel(track)}</div>
     <div class="track-cell track-artist">${escapeHtml(track.artist)}</div>
     <div class="track-cell track-album">${escapeHtml(track.album)}</div>
     <div class="track-duration">${formatTime(track.durationMs)}</div>
     <div class="track-actions">
-      <button class="${favorite ? "active" : ""}" data-action="favorite" data-track-id="${escapeAttribute(track.id)}" data-enabled="${!favorite}" aria-label="${favorite ? "Remove from" : "Add to"} favorites" title="Favorite">${icon("heart")}</button>
-      <button data-action="queue-add" data-track-id="${escapeAttribute(track.id)}" aria-label="Add ${escapeAttribute(track.title)} to queue" title="Add to queue">${icon("queue")}</button>
-      ${playlist ? `<button data-action="playlist-add" data-playlist-id="${escapeAttribute(playlist.id)}" data-track-id="${escapeAttribute(track.id)}" aria-label="Add to ${escapeAttribute(playlist.name)}" title="Add to ${escapeAttribute(playlist.name)}">${icon("playlist")}</button>` : ""}
+      <button class="${favorite ? "active" : ""}" data-action="favorite" data-track-id="${escapeAttribute(track.id)}" data-enabled="${!favorite}" aria-label="${favorite ? "Remove from" : "Add to"} favorites" title="Favorite" ${disabled()}>${icon("heart")}</button>
+      <button data-action="queue-add" data-track-id="${escapeAttribute(track.id)}" aria-label="Add ${escapeAttribute(track.title)} to queue" title="Add to queue" ${disabled()}>${icon("queue")}</button>
+      ${playlist ? `<button data-action="playlist-add" data-playlist-id="${escapeAttribute(playlist.id)}" data-track-id="${escapeAttribute(track.id)}" aria-label="Add to ${escapeAttribute(playlist.name)}" title="Add to ${escapeAttribute(playlist.name)}" ${disabled()}>${icon("playlist")}</button>` : ""}
       <button data-action="edit-track" data-track-id="${escapeAttribute(track.id)}" aria-label="Edit metadata for ${escapeAttribute(track.title)}" title="Edit metadata">${icon("edit")}</button>
     </div>
   </li>`;
@@ -747,7 +751,7 @@ function renderMetadataEditor(state: AppSnapshot): string {
           <label>Disc<input name="discNumber" type="number" min="1" max="999" value="${track.discNumber ?? ""}" /></label>
           <label>Year<input name="year" type="number" min="1000" max="9999" value="${track.year ?? ""}" /></label>
         </div>
-        <div class="metadata-actions"><button type="button" data-action="close-metadata">Cancel</button><button class="primary" data-testid="save-metadata">Save changes</button></div>
+        <div class="metadata-actions"><button type="button" data-action="close-metadata">Cancel</button><button class="primary" data-testid="save-metadata" ${disabled()}>Save changes</button></div>
       </form>
     </section>
   </div>`;
@@ -778,8 +782,8 @@ function renderPlaylists(state: AppSnapshot): string {
             (playlist) => `<li>
               <button class="select-playlist${selected?.id === playlist.id ? " selected" : ""}" data-action="select-playlist" data-playlist-id="${escapeAttribute(playlist.id)}">${escapeHtml(playlist.name)} <span class="muted">${playlist.trackIds.length}</span></button>
               <span class="row-actions">
-                <button data-action="rename-playlist" data-playlist-id="${escapeAttribute(playlist.id)}" aria-label="Rename ${escapeAttribute(playlist.name)}">${icon("edit")}</button>
-                <button class="danger" data-action="delete-playlist" data-playlist-id="${escapeAttribute(playlist.id)}" aria-label="Delete ${escapeAttribute(playlist.name)}">${icon("close")}</button>
+                <button data-action="rename-playlist" data-playlist-id="${escapeAttribute(playlist.id)}" aria-label="Rename ${escapeAttribute(playlist.name)}" ${disabled()}>${icon("edit")}</button>
+                <button class="danger" data-action="delete-playlist" data-playlist-id="${escapeAttribute(playlist.id)}" aria-label="Delete ${escapeAttribute(playlist.name)}" ${disabled()}>${icon("close")}</button>
               </span>
             </li>`,
           )
@@ -799,9 +803,9 @@ function renderPlaylistTracks(playlist: Playlist, state: AppSnapshot): string {
           <span class="queue-index">${index + 1}</span>
           <span class="track-title"><strong>${escapeHtml(track?.title ?? "Unavailable track")}</strong><span>${escapeHtml(track?.artist ?? "Not currently mounted")}</span></span>
           <span class="queue-buttons">
-            <button data-action="playlist-move" data-playlist-id="${escapeAttribute(playlist.id)}" data-from="${index}" data-to="${Math.max(0, index - 1)}" aria-label="Move up" ${index === 0 ? "disabled" : ""}>${icon("chevronUp")}</button>
-            <button data-action="playlist-move" data-playlist-id="${escapeAttribute(playlist.id)}" data-from="${index}" data-to="${Math.min(playlist.trackIds.length - 1, index + 1)}" aria-label="Move down" ${index === playlist.trackIds.length - 1 ? "disabled" : ""}>${icon("chevronDown")}</button>
-            <button data-action="playlist-remove" data-playlist-id="${escapeAttribute(playlist.id)}" data-index="${index}" aria-label="Remove from playlist">${icon("close")}</button>
+            <button data-action="playlist-move" data-playlist-id="${escapeAttribute(playlist.id)}" data-from="${index}" data-to="${Math.max(0, index - 1)}" aria-label="Move up" ${busy || index === 0 ? "disabled" : ""}>${icon("chevronUp")}</button>
+            <button data-action="playlist-move" data-playlist-id="${escapeAttribute(playlist.id)}" data-from="${index}" data-to="${Math.min(playlist.trackIds.length - 1, index + 1)}" aria-label="Move down" ${busy || index === playlist.trackIds.length - 1 ? "disabled" : ""}>${icon("chevronDown")}</button>
+            <button data-action="playlist-remove" data-playlist-id="${escapeAttribute(playlist.id)}" data-index="${index}" aria-label="Remove from playlist" ${disabled()}>${icon("close")}</button>
           </span>
         </li>`;
       })
@@ -835,7 +839,7 @@ function renderChatMessage(entry: ChatMessage, perspective: "local" | "remote"):
   const own = entry.sender === perspective;
   const sender = entry.sender === "local" ? "This computer" : "Remote browser";
   return `<article class="chat-message${own ? " is-own" : ""}" data-testid="chat-message" data-sender="${entry.sender}">
-    <div><strong>${sender}</strong><span><time datetime="${new Date(entry.sentAtMs).toISOString()}">${escapeHtml(formatChatTime(entry.sentAtMs))}</time><button data-action="delete-chat-message" data-message-id="${escapeAttribute(entry.id)}" aria-label="Delete message" title="Delete message">${icon("close")}</button></span></div>
+    <div><strong>${sender}</strong><span><time datetime="${new Date(entry.sentAtMs).toISOString()}">${escapeHtml(formatChatTime(entry.sentAtMs))}</time><button data-action="delete-chat-message" data-message-id="${escapeAttribute(entry.id)}" aria-label="Delete message" title="Delete message" ${disabled()}>${icon("close")}</button></span></div>
     <p>${escapeHtml(entry.text)}</p>
   </article>`;
 }
@@ -865,7 +869,7 @@ function renderBroadcast(): string {
 
 function renderQueue(state: AppSnapshot): string {
   const byId = new Map(state.tracks.map((track) => [track.id, track]));
-  return `<aside class="right-panel"><div class="right-header"><div><h2>Queue</h2><span>${state.player.queue.length} track${state.player.queue.length === 1 ? "" : "s"}</span></div><button data-action="queue-clear" ${state.player.queue.length ? "" : "disabled"}>Clear</button></div>
+  return `<aside class="right-panel"><div class="right-header"><div><h2>Queue</h2><span>${state.player.queue.length} track${state.player.queue.length === 1 ? "" : "s"}</span></div><button data-action="queue-clear" ${busy || !state.player.queue.length ? "disabled" : ""}>Clear</button></div>
     ${state.player.queue.length ? `<ol class="queue-list">${state.player.queue
       .map((id, index) => {
         const track = byId.get(id);
@@ -873,9 +877,9 @@ function renderQueue(state: AppSnapshot): string {
           <span class="queue-index">${index + 1}</span>
           <span class="track-title"><strong>${escapeHtml(track?.title ?? "Unavailable")}</strong><span>${escapeHtml(track?.artist ?? "")}</span></span>
           <span class="queue-buttons">
-            <button data-action="queue-move" data-from="${index}" data-to="${Math.max(0, index - 1)}" aria-label="Move up" ${index === 0 ? "disabled" : ""}>${icon("chevronUp")}</button>
-            <button data-action="queue-move" data-from="${index}" data-to="${Math.min(state.player.queue.length - 1, index + 1)}" aria-label="Move down" ${index === state.player.queue.length - 1 ? "disabled" : ""}>${icon("chevronDown")}</button>
-            <button data-action="queue-remove" data-index="${index}" aria-label="Remove from queue">${icon("close")}</button>
+            <button data-action="queue-move" data-from="${index}" data-to="${Math.max(0, index - 1)}" aria-label="Move up" ${busy || index === 0 ? "disabled" : ""}>${icon("chevronUp")}</button>
+            <button data-action="queue-move" data-from="${index}" data-to="${Math.min(state.player.queue.length - 1, index + 1)}" aria-label="Move down" ${busy || index === state.player.queue.length - 1 ? "disabled" : ""}>${icon("chevronDown")}</button>
+            <button data-action="queue-remove" data-index="${index}" aria-label="Remove from queue" ${disabled()}>${icon("close")}</button>
           </span>
         </li>`;
       })
@@ -895,10 +899,10 @@ function renderPlayer(state: AppSnapshot): string {
     <div class="transport">
       ${renderSoundVisualizer("host-visualizer")}
       <div class="transport-buttons">
-        <button class="icon" data-action="previous" aria-label="Previous track">${icon("previous")}</button>
-        <button class="icon player-primary" data-action="${playing ? "pause" : "play"}" data-testid="play-pause" aria-label="${playing ? "Pause" : "Play"}">${icon(playing ? "pause" : "play")}</button>
-        <button class="icon" data-action="next" aria-label="Next track">${icon("next")}</button>
-        <button class="icon" data-action="stop" aria-label="Stop">${icon("stop")}</button>
+        <button class="icon" data-action="previous" aria-label="Previous track" ${disabled()}>${icon("previous")}</button>
+        <button class="icon player-primary" data-action="${playing ? "pause" : "play"}" data-testid="play-pause" aria-label="${playing ? "Pause" : "Play"}" ${disabled()}>${icon(playing ? "pause" : "play")}</button>
+        <button class="icon" data-action="next" aria-label="Next track" ${disabled()}>${icon("next")}</button>
+        <button class="icon" data-action="stop" aria-label="Stop" ${disabled()}>${icon("stop")}</button>
       </div>
       <div class="progress-row">
         <span class="time" data-current-time>${formatTime(positionMs)}</span>
@@ -907,9 +911,9 @@ function renderPlayer(state: AppSnapshot): string {
       </div>
     </div>
     <div class="output-controls">
-      <button class="shuffle-button${state.player.shuffle ? " active" : ""}" data-action="shuffle" aria-pressed="${state.player.shuffle}" aria-label="Shuffle">${icon("shuffle")}</button>
-      <button class="repeat-button${state.player.repeat !== "off" ? " active" : ""}" data-action="repeat" aria-label="Repeat mode: ${state.player.repeat}">${icon("repeat")}${state.player.repeat === "one" ? `<span class="repeat-one">1</span>` : ""}</button>
-      <button class="icon" data-action="mute" aria-label="${state.player.muted ? "Unmute" : "Mute"}">${icon(state.player.muted ? "volumeOff" : "volume")}</button>
+      <button class="shuffle-button${state.player.shuffle ? " active" : ""}" data-action="shuffle" aria-pressed="${state.player.shuffle}" aria-label="Shuffle" ${disabled()}>${icon("shuffle")}</button>
+      <button class="repeat-button${state.player.repeat !== "off" ? " active" : ""}" data-action="repeat" aria-label="Repeat mode: ${state.player.repeat}" ${disabled()}>${icon("repeat")}${state.player.repeat === "one" ? `<span class="repeat-one">1</span>` : ""}</button>
+      <button class="icon" data-action="mute" aria-label="${state.player.muted ? "Unmute" : "Mute"}" ${disabled()}>${icon(state.player.muted ? "volumeOff" : "volume")}</button>
       <input data-volume data-testid="volume" type="range" min="0" max="100" value="${state.player.volume}" aria-label="Volume" />
     </div>
   </footer>`;

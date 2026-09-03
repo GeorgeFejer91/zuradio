@@ -25,6 +25,10 @@ forced-TURN, and endurance qualification remain release-channel gates.
   correctly rejected by the existing 16,384-byte message parser. Authenticated
   Control peers now negotiate ordered 11 KiB snapshot framing, bounded to 64
   MiB and 30 seconds, and become ready only after exact reassembly.
+- A remote CI run exposed a host interaction race: navigation looked available
+  while a mutation was still settling, but the click was discarded. Local view
+  changes now remain responsive while mutating controls are visibly disabled,
+  and the browser gate asserts that Favorites navigation actually completes.
 - The final staged benchmark was byte-exact for 9,729,283 source bytes: first
   catalogue publication in 2,174 ms, asynchronous recognition in 5,383 ms,
   upload at 1,815,165 B/s, download at 42,485,952 B/s, and two originals in the
