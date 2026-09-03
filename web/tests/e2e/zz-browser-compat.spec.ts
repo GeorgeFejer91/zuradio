@@ -1,4 +1,5 @@
 import fs from "node:fs";
+import path from "node:path";
 
 import { chromium, expect, test, type Page } from "@playwright/test";
 
@@ -58,7 +59,31 @@ test("plays laptop audio and selects folders and files for upload", async ({ bro
     expect(uploadConnectMs, `${browserName} listen-to-upload latency`).toBeLessThan(20_000);
     await expect(companion.getByRole("dialog")).toHaveCount(0);
 
-    await companion.locator("[data-upload-folder]").setInputFiles(selectionFolder as string);
+    const folderInput = companion.locator("[data-upload-folder]");
+    await expect(folderInput).toHaveAttribute("webkitdirectory", "");
+    if (browserName === "webkit") {
+      // Playwright's WPE driver populates a localDirectory input but never
+      // resolves that command. Select the same real files explicitly, restore
+      // their folder-relative paths, and dispatch the production input event.
+      const folderFiles = fs.readdirSync(selectionFolder as string, { withFileTypes: true })
+        .filter((entry) => entry.isFile())
+        .map((entry) => path.join(selectionFolder as string, entry.name));
+      await folderInput.evaluate((input) => input.removeAttribute("webkitdirectory"));
+      await folderInput.setInputFiles(folderFiles);
+      await folderInput.evaluate((input, folderName) => {
+        const picker = input as HTMLInputElement;
+        for (const file of Array.from(picker.files ?? [])) {
+          Object.defineProperty(file, "webkitRelativePath", {
+            configurable: true,
+            value: `${folderName}/${file.name}`,
+          });
+        }
+        picker.setAttribute("webkitdirectory", "");
+        picker.dispatchEvent(new Event("change", { bubbles: true }));
+      }, path.basename(selectionFolder as string));
+    } else {
+      await folderInput.setInputFiles(selectionFolder as string);
+    }
     await expect(companion.getByTestId("upload-selection")).toHaveText("3 files selected");
     await companion.locator("[data-upload-files]").setInputFiles(fixture as string);
     await expect(companion.getByTestId("upload-selection")).toHaveText("1 file selected");

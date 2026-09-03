@@ -59,7 +59,8 @@ bounded JSON/base64 path during a rolling upgrade.
    8 KiB as base64. The host binds binary frame metadata to the authenticated
    grant, peer, sequence, transfer, and file before forwarding bytes to Rust.
 3. `finish_file` supplies the browser's SHA-256 digest; Rust compares it with
-   the staged file.
+   the staged file and returns that receiver-verified digest in the per-file
+   catalogue acknowledgement.
 4. `finish_file` also parses, classifies, moves, incrementally catalogs, and
    publishes that verified file immediately. A failed destination commit leaves
    the verified staged file retryable in the same transaction. Same-filesystem
@@ -138,12 +139,37 @@ and throughput floors. A separate forced first-chunk rejection proves that the
 CLI reports the receiver error and last acknowledged stage instead of waiting
 only for the final import message.
 
+The browser Upload view keeps a transfer panel visible with monotonic overall
+and current-file bars, receiver stage, a bounded job ID, bytes, rate/ETA, and
+catalogue count. Receiver rejection leaves the panel in an explicit failed state
+with the last acknowledged progress intact.
+
 The standalone browser CLI separates its short page/connection timeout from an
 eight-hour whole-upload timeout, configurable with `--upload-timeout-ms` up to
-24 hours. Completed transactions are durable checkpoints: if a later one fails,
-the error reports how many earlier tracks were catalogued, and retrying the same
-selection reuses digest-qualified managed destinations instead of overwriting
-them.
+24 hours. It emits bounded live milestones for connection, selection, receiver
+progress, catalogue publication, and completion on standard error while keeping
+the final standard output JSON-only. Completed transactions are durable
+checkpoints: if a later one fails, the error reports how many earlier tracks
+were catalogued, and retrying the same selection reuses digest-qualified managed
+destinations instead of overwriting them.
+
+For large pre-catalogued collections, `--manifest` accepts JSON or CSV rows with
+`batchId`, `ordinal`, `sha256`, `relativePath`, `sizeBytes`, and `modifiedUnix`.
+The local source may be named by `sourcePath` (also `fullPath`, `absolutePath`,
+or `filePath`) or resolved from the relative path under the required
+`--source-root`. Before opening a browser, the CLI rejects duplicate hashes,
+unsafe relative paths, source-root escape, non-files, changed size/mtime, and
+unsupported extensions. The source root remains local and is never written to
+the acknowledgement ledger.
+
+After each per-file receiver catalogue acknowledgement, the CLI first requires
+the receiver-verified digest to equal that manifest row, then appends a
+`catalogued` event containing the non-secret manifest identity and SHA-256 to
+the required JSONL `--ledger`, flushes it, and synchronizes it to durable
+storage. Restarting the command validates the source again and selects only
+manifest hashes absent from that ledger. The browser gate forces the second of
+two files to fail after the first acknowledgement, then proves the retry skips
+the first hash and sends/catalogues only the missing file.
 
 ## Password file
 

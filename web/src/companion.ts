@@ -7,6 +7,30 @@ import { CompanionBridge, type PublicNowPlaying } from "./vdo";
 import { renderSoundVisualizer, SvgSoundVisualizer } from "./visualizer";
 
 type ControllerView = "library" | "queue" | "playlists" | "chat";
+type UploadPhase =
+  | "starting"
+  | "receiving"
+  | "verifying"
+  | "cataloguing"
+  | "catalogued"
+  | "complete"
+  | "interrupted";
+
+interface UploadActivity {
+  phase: UploadPhase;
+  jobId: string | null;
+  fileName: string;
+  fileIndex: number;
+  fileCount: number;
+  receivedBytes: number;
+  totalBytes: number;
+  fileReceived: number;
+  fileSize: number;
+  cataloguedCount: number;
+  startedAtMs: number;
+  detail: string | null;
+}
+
 const rootElement = document.querySelector<HTMLDivElement>("#app");
 if (!rootElement) throw new Error("Missing app root");
 const root: HTMLDivElement = rootElement;
@@ -35,6 +59,7 @@ let selectedMode: RemoteMode | null = null;
 let dialogMode: RemoteMode | null = null;
 let selectedFiles: File[] = [];
 let uploadProgress = "";
+let uploadActivity: UploadActivity | null = null;
 let importedFiles: ImportedFile[] = [];
 let selectedPlaylistId: string | null = null;
 let pendingPlaylistSelection: Set<string> | null = null;
@@ -354,25 +379,79 @@ async function connectTrusted(mode: RemoteMode, switching = false): Promise<void
 
 async function uploadSelectedFiles(): Promise<void> {
   if (!selectedFiles.length) return;
+  const byteOffsets: number[] = [];
+  let totalBytes = 0;
+  for (const file of selectedFiles) {
+    byteOffsets.push(totalBytes);
+    totalBytes += file.size;
+  }
+  const startedAtMs = Date.now();
   busy = true;
   errorMessage = "";
   importedFiles = [];
   uploadProgress = "Starting secure transfer · waiting for laptop acknowledgement";
+  uploadActivity = {
+    phase: "starting",
+    jobId: null,
+    fileName: selectedFiles[0]?.webkitRelativePath || selectedFiles[0]?.name || "Selected music",
+    fileIndex: 0,
+    fileCount: selectedFiles.length,
+    receivedBytes: 0,
+    totalBytes,
+    fileReceived: 0,
+    fileSize: selectedFiles[0]?.size ?? 1,
+    cataloguedCount: 0,
+    startedAtMs,
+    detail: "Waiting for laptop acknowledgement",
+  };
   render();
   try {
     const outcome = await bridge.uploadFiles(selectedFiles, (progress) => {
+      window.dispatchEvent(new CustomEvent("zuradio-upload-progress", { detail: progress }));
       const percent = Math.round((progress.fileReceived / progress.fileSize) * 100);
       const catalogued = progress.cataloguedCount
         ? ` · ${progress.cataloguedCount} catalogued on laptop`
         : "";
       uploadProgress = `${progress.fileIndex + 1}/${progress.fileCount} · ${progress.fileName} · ${percent}%${catalogued}`;
+      uploadActivity = {
+        phase: progress.phase,
+        jobId: progress.transferId,
+        fileName: progress.fileName,
+        fileIndex: progress.fileIndex,
+        fileCount: progress.fileCount,
+        receivedBytes: (byteOffsets[progress.fileIndex] ?? 0) + progress.fileReceived,
+        totalBytes,
+        fileReceived: progress.fileReceived,
+        fileSize: progress.fileSize,
+        cataloguedCount: progress.cataloguedCount,
+        startedAtMs,
+        detail: null,
+      };
       render();
     });
     importedFiles = outcome.imported;
     uploadProgress = `${outcome.imported.length} track${outcome.imported.length === 1 ? "" : "s"} added to the laptop library`;
+    uploadActivity = {
+      phase: "complete",
+      jobId: uploadActivity?.jobId ?? null,
+      fileName: "Zuradio Library",
+      fileIndex: Math.max(selectedFiles.length - 1, 0),
+      fileCount: selectedFiles.length,
+      receivedBytes: totalBytes,
+      totalBytes,
+      fileReceived: selectedFiles.at(-1)?.size ?? totalBytes,
+      fileSize: selectedFiles.at(-1)?.size ?? Math.max(totalBytes, 1),
+      cataloguedCount: outcome.imported.length,
+      startedAtMs,
+      detail: `${outcome.imported.length} track${outcome.imported.length === 1 ? " is" : "s are"} ready on the laptop`,
+    };
     selectedFiles = [];
   } catch (error) {
     errorMessage = messageOf(error);
+    if (uploadActivity) {
+      uploadActivity.phase = "interrupted";
+      uploadActivity.detail = errorMessage;
+    }
   } finally {
     busy = false;
     render();
@@ -539,8 +618,48 @@ function renderUpload(): string {
     </div>
     <p class="muted" data-testid="upload-selection">${selectedFiles.length ? `${selectedFiles.length} file${selectedFiles.length === 1 ? "" : "s"} selected` : "Choose individual audio files or an entire folder."}</p>
     <button class="primary" data-action="upload" data-testid="upload" ${selectedFiles.length && !busy ? "" : "disabled"}>Upload to Zuradio</button>
-    ${uploadProgress ? `<p class="upload-progress" role="status" data-testid="upload-progress">${escapeHtml(uploadProgress)}</p>` : ""}
+    ${renderUploadActivity()}
     ${importedFiles.length ? `<ol class="imported-list">${importedFiles.map((file) => `<li><strong>${escapeHtml(file.title)}</strong><span>${escapeHtml(file.artist)} · ${escapeHtml(file.album)}${file.year ? ` · ${file.year}` : ""}</span></li>`).join("")}</ol>` : ""}
+  </section>`;
+}
+
+function renderUploadActivity(): string {
+  if (!uploadActivity) return "";
+  const activity = uploadActivity;
+  const percent = activity.totalBytes > 0
+    ? Math.min(100, Math.round((activity.receivedBytes / activity.totalBytes) * 100))
+    : 0;
+  const filePercent = activity.fileSize > 0
+    ? Math.min(100, Math.round((activity.fileReceived / activity.fileSize) * 100))
+    : 0;
+  const elapsedSeconds = Math.max((Date.now() - activity.startedAtMs) / 1_000, 0.001);
+  const bytesPerSecond = activity.receivedBytes / elapsedSeconds;
+  const remainingSeconds = bytesPerSecond > 0
+    ? Math.max(0, activity.totalBytes - activity.receivedBytes) / bytesPerSecond
+    : null;
+  const heading = {
+    starting: "Starting secure transfer",
+    receiving: "Sending music to the laptop",
+    verifying: "Verifying completed song",
+    cataloguing: "Cataloguing completed song",
+    catalogued: "Song safely catalogued",
+    complete: "Transfer complete",
+    interrupted: "Transfer interrupted",
+  }[activity.phase];
+  const detail = activity.detail ?? activity.fileName;
+  const job = activity.jobId ? activity.jobId.replace(/^transfer-/, "").slice(0, 8) : "allocating";
+  const rate = bytesPerSecond > 0 ? `${formatBytes(bytesPerSecond)}/s` : "Measuring speed";
+  const eta = remainingSeconds !== null && activity.phase !== "complete"
+    ? ` · about ${formatDuration(remainingSeconds)} remaining`
+    : "";
+  return `<section class="remote-transfer phase-${activity.phase}" data-testid="remote-transfer-status" aria-live="polite">
+    <div class="remote-transfer-heading"><strong>${escapeHtml(heading)}</strong><span>Job ${escapeHtml(job)} · ${escapeHtml(detail)}</span></div>
+    <div class="remote-transfer-meter"><span>Overall · ${formatBytes(activity.receivedBytes)} / ${formatBytes(activity.totalBytes)}</span><span>${percent}%</span></div>
+    <progress data-testid="upload-progress-bar" max="${Math.max(activity.totalBytes, 1)}" value="${activity.receivedBytes}" aria-label="Overall upload progress">${percent}%</progress>
+    <div class="remote-transfer-meter"><span>File ${activity.fileIndex + 1} of ${activity.fileCount}</span><span>${filePercent}%</span></div>
+    <progress data-testid="upload-file-progress-bar" max="${Math.max(activity.fileSize, 1)}" value="${activity.fileReceived}" aria-label="Current file upload progress">${filePercent}%</progress>
+    <div class="remote-transfer-summary"><span data-testid="upload-progress-count">${activity.cataloguedCount} of ${activity.fileCount} catalogued</span><span data-testid="upload-progress-rate">${escapeHtml(rate)}${escapeHtml(eta)}</span></div>
+    ${uploadProgress ? `<p class="upload-progress" role="status" data-testid="upload-progress">${escapeHtml(uploadProgress)}</p>` : ""}
   </section>`;
 }
 
@@ -736,6 +855,19 @@ function formatTime(milliseconds: number): string {
   return `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
 }
 
+function formatBytes(bytes: number): string {
+  if (bytes < 1_024) return `${bytes} B`;
+  if (bytes < 1_048_576) return `${(bytes / 1_024).toFixed(1)} KiB`;
+  if (bytes < 1_073_741_824) return `${(bytes / 1_048_576).toFixed(1)} MiB`;
+  return `${(bytes / 1_073_741_824).toFixed(1)} GiB`;
+}
+
+function formatDuration(seconds: number): string {
+  if (seconds < 60) return `${Math.max(1, Math.round(seconds))} sec`;
+  if (seconds < 3_600) return `${Math.max(1, Math.round(seconds / 60))} min`;
+  return `${Math.max(1, Math.round(seconds / 3_600))} hr`;
+}
+
 function formatChatTime(timestamp: number): string {
   return new Intl.DateTimeFormat(undefined, {
     dateStyle: "short",
@@ -787,14 +919,16 @@ function selectUploads(input: HTMLInputElement): void {
   if (!files.length) return;
   selectedFiles = files;
   importedFiles = [];
+  errorMessage = "";
   uploadProgress = "";
+  uploadActivity = null;
   const selection = root.querySelector<HTMLElement>('[data-testid="upload-selection"]');
   if (selection) {
     selection.textContent = `${selectedFiles.length} file${selectedFiles.length === 1 ? "" : "s"} selected`;
   }
   const uploadButton = root.querySelector<HTMLButtonElement>('[data-action="upload"]');
   if (uploadButton) uploadButton.disabled = busy;
-  root.querySelector(".upload-progress")?.remove();
+  root.querySelector("[data-testid='remote-transfer-status']")?.remove();
   root.querySelector(".imported-list")?.remove();
 }
 

@@ -87,6 +87,9 @@ test("passes the staged upload, immediate catalogue, organized storage, and down
     fs.writeFileSync(isolatedLibrary, "temporary storage-gate blocker");
     libraryIsBlocked = true;
     const progress = uploader.getByTestId("upload-progress");
+    const remoteProgress = uploader.getByTestId("remote-transfer-status");
+    const overallProgressBar = uploader.getByTestId("upload-progress-bar");
+    const fileProgressBar = uploader.getByTestId("upload-file-progress-bar");
     const localProgress = host.getByTestId("local-transfer-status");
     try {
       await uploader.getByTestId("upload").click();
@@ -94,6 +97,8 @@ test("passes the staged upload, immediate catalogue, organized storage, and down
         /upload storage is unavailable while (preparing|verifying) the managed library/i,
       );
       await expect(progress).toHaveText("Starting secure transfer · waiting for laptop acknowledgement");
+      await expect(remoteProgress).toContainText("Transfer interrupted");
+      await expect(overallProgressBar).toHaveAttribute("value", "0");
       await expect(localProgress).toContainText("Transfer interrupted");
       await expect(localProgress).toContainText(/upload storage is unavailable while/i);
     } finally {
@@ -102,9 +107,27 @@ test("passes the staged upload, immediate catalogue, organized storage, and down
     }
 
     const uploadStarted = performance.now();
+    await uploader.evaluate(() => {
+      const stages: string[] = [];
+      const values: number[] = [];
+      Object.defineProperty(window, "__zuradioTransferStages", { value: stages });
+      Object.defineProperty(window, "__zuradioTransferValues", { value: values });
+      const app = document.querySelector("#app");
+      if (app) {
+        new MutationObserver(() => {
+          const value = app.querySelector("[data-testid='remote-transfer-status'] strong")?.textContent ?? "";
+          if (value && stages.at(-1) !== value) stages.push(value);
+          const progress = Number(app.querySelector("[data-testid='upload-progress-bar']")?.getAttribute("value"));
+          if (Number.isFinite(progress) && values.at(-1) !== progress) values.push(progress);
+        }).observe(app, { childList: true, subtree: true, characterData: true });
+      }
+    });
     await uploader.getByTestId("upload").click();
+    await expect(remoteProgress).toContainText("Sending music to the laptop", { timeout: 10_000 });
     await expect(localProgress).toContainText("Receiving music from another computer", { timeout: 10_000 });
     await expect.poll(async () => (await progress.textContent()) ?? "", { timeout: 45_000 }).toMatch(/[1-9]\d*%/);
+    await expect.poll(async () => Number(await overallProgressBar.getAttribute("value")), { timeout: 45_000 }).toBeGreaterThan(0);
+    await expect.poll(async () => Number(await fileProgressBar.getAttribute("value")), { timeout: 45_000 }).toBeGreaterThan(0);
     expect(
       await uploader.evaluate(() => (window as unknown as { __zuradioDataChannels: string[] }).__zuradioDataChannels),
       "audio bytes must use the dedicated binary data channel",
@@ -114,11 +137,27 @@ test("passes the staged upload, immediate catalogue, organized storage, and down
     const firstCatalogueMs = Math.round(performance.now() - uploadStarted);
     expect(firstCatalogueMs).toBeLessThan(firstCatalogueLimitMs);
     await expect(host.getByTestId("local-transfer-count")).toHaveText("1 of 2 catalogued");
+    await expect(uploader.getByTestId("upload-progress-count")).toHaveText("1 of 2 catalogued");
     await host.screenshot({ path: "test-results/local-transfer-activity.png", fullPage: true });
+    await uploader.screenshot({ path: "test-results/remote-transfer-activity.png", fullPage: true });
     await expect.poll(() => host.locator("[data-track-row]").count(), { timeout: 10_000 }).toBeGreaterThan(hostTrackCount);
 
     await expect(progress).toContainText("2 tracks added to the laptop library", { timeout: 150_000 });
     await expect(uploader.locator(".imported-list li")).toHaveCount(2);
+    await expect(remoteProgress).toContainText("Transfer complete");
+    await expect(uploader.getByTestId("upload-progress-count")).toHaveText("2 of 2 catalogued");
+    expect(await overallProgressBar.getAttribute("value")).toBe(await overallProgressBar.getAttribute("max"));
+    const transferStages = await uploader.evaluate(
+      () => (window as unknown as { __zuradioTransferStages: string[] }).__zuradioTransferStages,
+    );
+    expect(transferStages).toContain("Verifying completed song");
+    expect(transferStages).toContain("Cataloguing completed song");
+    expect(transferStages).toContain("Transfer complete");
+    const transferValues = await uploader.evaluate(
+      () => (window as unknown as { __zuradioTransferValues: number[] }).__zuradioTransferValues,
+    );
+    expect(transferValues.length).toBeGreaterThan(2);
+    expect(transferValues.every((value, index) => index === 0 || value >= (transferValues[index - 1] ?? 0))).toBe(true);
     await expect(localProgress).toContainText("Transfer complete");
     await expect(host.getByTestId("local-transfer-count")).toHaveText("2 of 2 catalogued");
     const uploadMs = Math.max(1, Math.round(performance.now() - uploadStarted));

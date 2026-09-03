@@ -37,7 +37,10 @@ VDO.Ninja data path. The test must prove, in order:
    panel report it as catalogued, while later files in the same selection are
    still transferring. The local panel must show acknowledged bytes, percentage,
    current file, and completed-versus-total count. Do not defer this to batch
-   `commit` or a later full-library scan. Acoustic recognition must begin only
+   `commit` or a later full-library scan. The remote uploader must retain a
+   visible transfer panel with monotonic overall and current-file progress bars,
+   receiver stage, bounded job ID, bytes, percentage, rate/ETA, and catalogue
+   count through completion or failure. Acoustic recognition must begin only
    after this publication and run in parallel, so a slow or unavailable provider
    can never delay the catalogue or the remaining transfer.
 5. **Visible organized original:** the verified bytes reside under the isolated
@@ -94,7 +97,8 @@ an optional provider while claiming automatic acoustic metadata is integral.
   mismatch, pre-transfer library write probing, retry after a destination
   failure, atomic cross-filesystem copy publication, per-file survival after
   grant revocation, restart cleanup, UTF-8/Windows destination sanitization,
-  metadata inference, and hidden-library migration.
+  metadata inference, receiver-verified digest acknowledgement, and
+  hidden-library migration.
 - `web/tests/e2e/data-transfer.spec.ts` is the browser/CLI benchmark above. It
   must make the isolated managed-library root unavailable, prove `begin` fails
   visibly before byte progress, restore the root, and then complete the same
@@ -107,7 +111,15 @@ an optional provider while claiming automatic acoustic metadata is integral.
   ordered files against count, byte, and declaration-size bounds. It must also
   force a receiver-side first-chunk rejection and prove the CLI prints that error
   plus its last transfer stage rather than only timing out while waiting for
-  final success.
+  final success. A successful CLI run must stream bounded connection, selection,
+  receiver-progress, per-song catalogue, and completion milestones to standard
+  error while preserving final machine-readable JSON alone on standard output;
+  do not emit one terminal line per transport chunk. Manifest mode must validate
+  its deduplicated SHA-256/relative-path catalogue against the constrained local
+  source root, require each receiver-returned verified digest to match its
+  manifest row, sync a path-free append-only ledger after each catalogue
+  acknowledgement, force a later file to fail, and prove the retry sends only
+  the unacknowledged hash.
 - The full multi-browser gate remains mandatory after the focused transfer gate.
 
 Never replace a stage with a mocked channel, an HTTP-only upload, a unit test,

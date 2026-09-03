@@ -83,6 +83,7 @@ pub(crate) struct ImportedFile {
     pub(crate) artist: String,
     pub(crate) album: String,
     pub(crate) year: Option<u32>,
+    pub(crate) sha256: String,
 }
 
 #[derive(Debug, Error)]
@@ -686,6 +687,7 @@ fn prepare_import(
             artist: bounded_metadata(&artist),
             album: bounded_metadata(&album),
             year,
+            sha256: digest.to_owned(),
         },
         staged_path: entry.staged_path.clone(),
         destination,
@@ -1008,11 +1010,12 @@ mod tests {
         let finished = manager.execute(UploadOperation::FinishFile {
             transfer_id: transfer.into(),
             file_id: file.into(),
-            sha256: digest,
+            sha256: digest.clone(),
         })?;
 
         assert_eq!(finished.status, "catalogued");
         assert_eq!(finished.imported.len(), 1);
+        assert_eq!(finished.imported[0].sha256, digest);
         let path = finished
             .catalogued_path
             .ok_or_else(|| UploadError::unavailable("reading the catalogued test path"))?;
@@ -1178,6 +1181,7 @@ mod tests {
                 artist: "Artist".into(),
                 album: "Album".into(),
                 year: None,
+                sha256: encode_hex(&Sha256::digest(&bytes)),
             },
             staged_path: staged_path.clone(),
             destination: destination.clone(),

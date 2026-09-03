@@ -113,6 +113,9 @@ type ConnectionAuth =
   | { kind: "device"; trusted: StoredTrustedDevice };
 
 export interface UploadProgress {
+  phase: "receiving" | "verifying" | "cataloguing" | "catalogued";
+  transferId: string;
+  sha256: string | null;
   fileName: string;
   fileIndex: number;
   fileCount: number;
@@ -795,6 +798,9 @@ export class CompanionBridge {
     });
     if (this.uploadTransport === "binary-v1") await this.ensureUploadChannel();
     onProgress({
+      phase: "receiving",
+      transferId,
+      sha256: null,
       fileName: entries[0]?.relativePath ?? "Selected music",
       fileIndex: entries[0]?.fileIndex ?? 0,
       fileCount: totalFileCount,
@@ -805,6 +811,7 @@ export class CompanionBridge {
     try {
       for (const entry of entries) {
         if (!entry) continue;
+        let acknowledgedBytes = 0;
         const digestPromise = entry.file
           .arrayBuffer()
           .then((bytes) => crypto.subtle.digest("SHA-256", bytes))
@@ -819,11 +826,15 @@ export class CompanionBridge {
             const received = offset + chunk.length;
             pendingChunks.push(
               this.sendUploadChunk(transferId, entry.fileId, offset, chunk, entry.relativePath).then(() => {
+                acknowledgedBytes = Math.max(acknowledgedBytes, received);
                 onProgress({
+                  phase: "receiving",
+                  transferId,
+                  sha256: null,
                   fileName: entry.relativePath,
                   fileIndex: entry.fileIndex,
                   fileCount: totalFileCount,
-                  fileReceived: received,
+                  fileReceived: acknowledgedBytes,
                   fileSize: entry.file.size,
                   cataloguedCount,
                 });
@@ -838,7 +849,29 @@ export class CompanionBridge {
           await Promise.allSettled(pendingChunks);
           throw error;
         }
+        onProgress({
+          phase: "verifying",
+          transferId,
+          sha256: null,
+          fileName: entry.relativePath,
+          fileIndex: entry.fileIndex,
+          fileCount: totalFileCount,
+          fileReceived: entry.file.size,
+          fileSize: entry.file.size,
+          cataloguedCount,
+        });
         const digest = await digestPromise;
+        onProgress({
+          phase: "cataloguing",
+          transferId,
+          sha256: null,
+          fileName: entry.relativePath,
+          fileIndex: entry.fileIndex,
+          fileCount: totalFileCount,
+          fileReceived: entry.file.size,
+          fileSize: entry.file.size,
+          cataloguedCount,
+        });
         const finished = await this.sendUpload({
           kind: "finish_file",
           transferId,
@@ -846,8 +879,15 @@ export class CompanionBridge {
           sha256: digest,
         });
         imported.push(...finished.outcome.imported);
+        const acknowledgedSha256 = finished.outcome.imported[0]?.sha256 ?? null;
+        if (acknowledgedSha256 && acknowledgedSha256.toLocaleLowerCase() !== digest.toLocaleLowerCase()) {
+          throw new Error("The laptop returned a different catalogue digest");
+        }
         cataloguedCount += finished.outcome.imported.length;
         onProgress({
+          phase: "catalogued",
+          transferId,
+          sha256: acknowledgedSha256,
           fileName: entry.relativePath,
           fileIndex: entry.fileIndex,
           fileCount: totalFileCount,

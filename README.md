@@ -182,8 +182,9 @@ fingerprint—not the original audio file—to Shazam's service, so recognition
 needs Internet access and is not a fully offline recognizer.
 
 An external program or Codex agent can use the same browser bridge through the
-machine-readable upload command. It accepts repeated individual files or one
-whole folder and never places the password on the command line:
+machine-readable upload command. It accepts repeated individual files, one
+whole folder, or a catalogue manifest and never places the password on the
+command line:
 
 ```sh
 cd web
@@ -191,18 +192,31 @@ npm ci
 npx playwright install chromium
 npm run upload -- --password-file "/path/to/zuradio.txt" --file "/path/to/song.flac"
 npm run upload -- --password-file "/path/to/zuradio.txt" --folder "/path/to/music-folder"
+npm run upload -- --password-file "/path/to/zuradio.txt" --manifest "/path/to/batch.csv" --source-root "/path/to/music" --ledger "/path/to/catalogued.jsonl"
 ```
 
 The command defaults to the public companion, can target another deployment
 with `--url`, and can use an installed Chrome or Brave binary with
 `--browser-executable`. It prints JSON describing the selected/imported tracks,
 source byte count, connection time, upload duration, and transfer rate, so
-automation can verify the result. The browser remains only a secure transport
-client; files still travel directly to the active laptop and are never stored
-by GitHub Pages. Its default whole-upload timeout is eight hours; use
+automation can verify the result. While it runs, bounded connection, selection,
+receiver-progress, per-song catalogue, and completion updates are written to
+standard error; the final standard output remains JSON-only for automation.
+The browser remains only a secure transport client; files still travel directly
+to the active laptop and are never stored by GitHub Pages. Its default
+whole-upload timeout is eight hours; use
 `--upload-timeout-ms` for a different 10-second-to-24-hour window. For a large
 folder, each bounded transaction is a durable checkpoint and a later failure
 reports how many earlier tracks are already safely catalogued.
+
+Manifest mode is intended for large, deduplicated catalogues. JSON or CSV rows
+provide `batchId`, `ordinal`, `sha256`, `relativePath`, `sizeBytes`, and
+`modifiedUnix`; a row may include `sourcePath`, or its relative path is resolved
+under `--source-root`. The CLI rejects path escape, duplicate digests, changed
+size or modification time, and unsupported media before connection. Each
+receiver catalogue acknowledgement is appended and synced to the JSONL ledger,
+which contains no source-root path. A retry selects only hashes that do not yet
+have a durable acknowledgement.
 
 ## Broadcast to a phone
 

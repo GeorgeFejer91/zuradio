@@ -125,6 +125,9 @@ The broadcasting host renders acknowledged operations as a local transfer strip
 with the current path, byte progress, percentage, and per-file catalogue count,
 then preserves a completion or interruption result long enough for the laptop
 operator to see it.
+The uploader mirrors those acknowledgements in a persistent transfer panel with
+overall and per-file progress bars, receiver stage, a bounded job identifier,
+bytes, rate/ETA, and catalogue count; completion and failure remain visible.
 
 ## Live audio bridge
 

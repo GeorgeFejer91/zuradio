@@ -1,5 +1,8 @@
 import { execFile } from "node:child_process";
+import { createHash } from "node:crypto";
 import fs from "node:fs";
+import os from "node:os";
+import path from "node:path";
 import { promisify } from "node:util";
 import { fileURLToPath } from "node:url";
 
@@ -148,6 +151,11 @@ test("uploads an individual file through the external browser CLI", async ({ bro
       { timeout: 210_000, maxBuffer: 1024 * 1024 },
     );
     expect(stderr).not.toContain("Zuradio upload failed");
+    expect(stderr).toContain("Zuradio connection: Upload connected");
+    expect(stderr).toContain("Zuradio selection: 1 file ready");
+    expect(stderr).toContain("Zuradio receiver: Starting secure transfer");
+    expect(stderr).toMatch(/Zuradio receiver: 1\/1 .* 100% · 1 catalogued on laptop/);
+    expect(stderr).toContain("Zuradio receiver: 1 track added to the laptop library");
     const result = JSON.parse(stdout) as {
       status: string;
       source: string;
@@ -169,6 +177,195 @@ test("uploads an individual file through the external browser CLI", async ({ bro
     expect(result.uploadMs).toBeGreaterThan(0);
     expect(result.bytesPerSecond).toBeGreaterThan(32 * 1024);
   } finally {
+    await stopBroadcast(host);
+  }
+});
+
+test("resumes a catalogue manifest from its durable receiver-ack ledger", async ({ browser }) => {
+  test.skip(!fixture || !fs.existsSync(fixture), "Set ZURADIO_UPLOAD_FIXTURE to a valid audio file");
+  test.setTimeout(300_000);
+  const host = await authenticatedHost(browser);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "zuradio-cli-manifest-"));
+  try {
+    await startFreshBroadcast(host);
+    const sourcePath = fixture as string;
+    const sourceRoot = path.dirname(sourcePath);
+    const metadata = fs.statSync(sourcePath);
+    const sha256 = createHash("sha256").update(fs.readFileSync(sourcePath)).digest("hex");
+    const manifestPath = path.join(directory, "batch.json");
+    const ledgerPath = path.join(directory, "catalogued.jsonl");
+    fs.writeFileSync(manifestPath, JSON.stringify({
+      batchId: "qualification-batch-001",
+      files: [{
+        ordinal: 1,
+        sha256,
+        relativePath: `Manifest Artist/Manifest Album/${path.basename(sourcePath)}`,
+        filename: path.basename(sourcePath),
+        extension: path.extname(sourcePath),
+        sizeBytes: metadata.size,
+        modifiedUnix: metadata.mtimeMs / 1_000,
+        sourcePath,
+      }],
+    }));
+    const argumentsList = [
+      uploadCli,
+      "--url",
+      companionBase,
+      "--password-file",
+      passwordPath,
+      "--manifest",
+      manifestPath,
+      "--source-root",
+      sourceRoot,
+      "--ledger",
+      ledgerPath,
+    ];
+
+    const first = await execFileAsync(process.execPath, argumentsList, {
+      timeout: 210_000,
+      maxBuffer: 1024 * 1024,
+    });
+    expect(first.stderr).toContain("Zuradio resume: qualification-batch-001 · 0 confirmed hashes skipped · 1 pending");
+    expect(first.stderr).toContain("Zuradio ledger: 1 receiver-acknowledged hash recorded");
+    expect(first.stderr).not.toContain(sourceRoot);
+    expect(JSON.parse(first.stdout)).toMatchObject({
+      status: "uploaded",
+      source: "manifest",
+      batchId: "qualification-batch-001",
+      plannedFiles: 1,
+      selectedFiles: 1,
+      skippedFiles: 0,
+      importedTracks: 1,
+    });
+    const ledgerLines = fs.readFileSync(ledgerPath, "utf8").trim().split(/\r?\n/);
+    expect(ledgerLines).toHaveLength(1);
+    expect(JSON.parse(ledgerLines[0] ?? "{}")).toMatchObject({ event: "catalogued", sha256 });
+
+    const resumed = await execFileAsync(process.execPath, argumentsList, {
+      timeout: 30_000,
+      maxBuffer: 1024 * 1024,
+    });
+    expect(resumed.stderr).toContain("1 confirmed hash skipped · 0 pending");
+    expect(JSON.parse(resumed.stdout)).toMatchObject({
+      status: "already_uploaded",
+      source: "manifest",
+      plannedFiles: 1,
+      selectedFiles: 0,
+      skippedFiles: 1,
+      importedTracks: 0,
+    });
+    expect(fs.readFileSync(ledgerPath, "utf8").trim().split(/\r?\n/)).toHaveLength(1);
+  } finally {
+    fs.rmSync(directory, { recursive: true, force: true });
+    await stopBroadcast(host);
+  }
+});
+
+test("resumes an interrupted manifest without resending a receiver-acknowledged hash", async ({ browser }) => {
+  test.setTimeout(360_000);
+  const host = await authenticatedHost(browser);
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), "zuradio-cli-interrupted-manifest-"));
+  try {
+    await startFreshBroadcast(host);
+    const sources = ["01 - first.wav", "02 - second.wav"].map((name, index) => {
+      const sourcePath = path.join(directory, name);
+      fs.writeFileSync(sourcePath, minimalWav(index + 1));
+      const metadata = fs.statSync(sourcePath);
+      return {
+        ordinal: index + 1,
+        sha256: createHash("sha256").update(fs.readFileSync(sourcePath)).digest("hex"),
+        relativePath: `Resume Artist/Resume Album/${name}`,
+        filename: name,
+        extension: ".wav",
+        sizeBytes: metadata.size,
+        modifiedUnix: metadata.mtimeMs / 1_000,
+        sourcePath,
+      };
+    });
+    const manifestPath = path.join(directory, "interrupted-batch.json");
+    const ledgerPath = path.join(directory, "catalogued.jsonl");
+    fs.writeFileSync(manifestPath, JSON.stringify({ batchId: "qualification-interrupted-001", files: sources }));
+    const argumentsList = [
+      uploadCli,
+      "--url",
+      companionBase,
+      "--password-file",
+      passwordPath,
+      "--manifest",
+      manifestPath,
+      "--source-root",
+      directory,
+      "--ledger",
+      ledgerPath,
+      "--timeout-ms",
+      "60000",
+    ];
+
+    let firstFileId: string | null = null;
+    let rejectedSecondFile = false;
+    await host.route("**/api/v1/remote/upload", async (route) => {
+      const body = route.request().postDataJSON() as {
+        operation?: { kind?: string; fileId?: string; files?: Array<{ fileId?: string }> };
+      };
+      const operation = body.operation;
+      if (operation?.kind === "begin" && !firstFileId) firstFileId = operation.files?.[0]?.fileId ?? null;
+      if (operation?.kind === "chunk" && firstFileId && operation.fileId !== firstFileId) {
+        rejectedSecondFile = true;
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({
+            code: "storage",
+            message: "forced second-file receiver gate rejection",
+            revision: null,
+          }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    const interrupted = await execFileAsync(process.execPath, argumentsList, {
+      timeout: 210_000,
+      maxBuffer: 1024 * 1024,
+    }).then(
+      (result) => ({ failed: false, stdout: result.stdout, stderr: result.stderr }),
+      (error: unknown) => ({
+        failed: true,
+        stdout: String((error as { stdout?: string }).stdout ?? ""),
+        stderr: String((error as { stderr?: string }).stderr ?? error),
+      }),
+    );
+    expect(interrupted.failed).toBe(true);
+    expect(rejectedSecondFile).toBe(true);
+    expect(interrupted.stderr).toContain("1 receiver-acknowledged hash recorded");
+    expect(interrupted.stderr).toContain("forced second-file receiver gate rejection");
+    const interruptedLedger = fs.readFileSync(ledgerPath, "utf8").trim().split(/\r?\n/);
+    expect(interruptedLedger).toHaveLength(1);
+    expect(JSON.parse(interruptedLedger[0] ?? "{}")).toMatchObject({ sha256: sources[0]?.sha256 });
+
+    await host.unroute("**/api/v1/remote/upload");
+    const resumed = await execFileAsync(process.execPath, argumentsList, {
+      timeout: 210_000,
+      maxBuffer: 1024 * 1024,
+    });
+    expect(resumed.stderr).toContain("1 confirmed hash skipped · 1 pending");
+    expect(JSON.parse(resumed.stdout)).toMatchObject({
+      status: "uploaded",
+      source: "manifest",
+      batchId: "qualification-interrupted-001",
+      plannedFiles: 2,
+      selectedFiles: 1,
+      skippedFiles: 1,
+      importedTracks: 1,
+    });
+    const resumedLedger = fs.readFileSync(ledgerPath, "utf8").trim().split(/\r?\n/);
+    expect(resumedLedger).toHaveLength(2);
+    expect(resumedLedger.map((line) => JSON.parse(line).sha256)).toEqual(sources.map((entry) => entry.sha256));
+    expect(fs.readFileSync(ledgerPath, "utf8")).not.toContain(directory);
+  } finally {
+    await host.unroute("**/api/v1/remote/upload").catch(() => undefined);
+    fs.rmSync(directory, { recursive: true, force: true });
     await stopBroadcast(host);
   }
 });

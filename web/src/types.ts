@@ -190,6 +190,7 @@ export interface ImportedFile {
   artist: string;
   album: string;
   year: number | null;
+  sha256?: string;
 }
 
 export interface UploadOutcome {

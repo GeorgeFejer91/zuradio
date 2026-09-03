@@ -915,8 +915,79 @@ h3 {
 }
 
 .upload-progress {
+  margin: 0;
   color: #fff;
   font-variant-numeric: tabular-nums;
+}
+
+.remote-transfer {
+  display: grid;
+  gap: 9px;
+  margin-top: 18px;
+  padding: 13px 0;
+  border-block: 1px solid var(--line-strong);
+}
+
+.remote-transfer.phase-interrupted {
+  border-bottom-color: var(--danger);
+}
+
+.remote-transfer-heading {
+  display: grid;
+  gap: 2px;
+}
+
+.remote-transfer-heading span,
+.remote-transfer-meter,
+.remote-transfer-summary {
+  color: var(--muted);
+}
+
+.remote-transfer-heading span {
+  overflow-wrap: anywhere;
+}
+
+.remote-transfer.phase-complete strong,
+.remote-transfer.phase-complete .remote-transfer-summary span:first-child,
+.remote-transfer.phase-catalogued strong {
+  color: var(--success);
+}
+
+.remote-transfer.phase-interrupted strong {
+  color: var(--danger);
+}
+
+.remote-transfer progress {
+  width: 100%;
+  height: 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 0;
+  background: var(--surface-3);
+}
+
+.remote-transfer progress::-webkit-progress-bar {
+  background: var(--surface-3);
+}
+
+.remote-transfer progress::-webkit-progress-value {
+  background: var(--accent);
+}
+
+.remote-transfer progress::-moz-progress-bar {
+  background: var(--accent);
+}
+
+.remote-transfer-meter,
+.remote-transfer-summary {
+  display: flex;
+  justify-content: space-between;
+  gap: 12px;
+  font-size: 12px;
+  font-variant-numeric: tabular-nums;
+}
+
+.remote-transfer-summary {
+  flex-wrap: wrap;
 }
 
 .imported-list {
