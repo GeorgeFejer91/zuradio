@@ -166,8 +166,37 @@ test("streams from the laptop while enforcing listener and controller roles", as
     await controller.getByTestId("remote-chat-send").click();
     await expect(host.getByTestId("host-chat").getByText(remoteMessage, { exact: true })).toBeVisible();
     await expect(controller.getByTestId("remote-chat").getByText(remoteMessage, { exact: true })).toBeVisible();
-    expect(Date.now() - chatCommandStarted, "remote chat acknowledgement latency").toBeLessThan(MAX_COMMAND_RTT_MS);
+    const chatCommandRttMs = Date.now() - chatCommandStarted;
+    expect(chatCommandRttMs, "remote chat acknowledgement latency").toBeLessThan(MAX_COMMAND_RTT_MS);
     await expect(host.locator('[data-testid="chat-message"][data-sender="remote"]')).toContainText(remoteMessage);
+
+    const oversizedUtf8Message = "🙂".repeat(16_385);
+    await controller.getByTestId("remote-chat-input").fill(oversizedUtf8Message);
+    await expect(controller.getByTestId("remote-chat-count")).toHaveText(
+      "16,385 / 65,536 characters · 65,540 / 65,536 UTF-8 bytes",
+    );
+    await expect(controller.getByTestId("remote-chat-send")).toBeDisabled();
+
+    const longRemoteMessage = (`Remote long plan\n${"checkpoint line\n".repeat(5_000)}`).slice(0, 65_535) + "Z";
+    expect(new TextEncoder().encode(longRemoteMessage)).toHaveLength(65_536);
+    await controller.getByTestId("remote-chat-input").fill(longRemoteMessage);
+    await expect(controller.getByTestId("remote-chat-count")).toHaveText(
+      "65,536 / 65,536 characters · 65,536 / 65,536 UTF-8 bytes",
+    );
+    const longChatCommandStarted = Date.now();
+    await controller.getByTestId("remote-chat-send").click();
+    const hostLongMessage = host.locator('[data-testid="chat-message"][data-sender="remote"]').last().locator("p");
+    await expect(hostLongMessage).toHaveCount(1, { timeout: 20_000 });
+    await expect.poll(
+      () => hostLongMessage.evaluate((node, expected) => node.textContent === expected, longRemoteMessage),
+      { timeout: 20_000 },
+    ).toBe(true);
+    const controllerLongMessage = controller.locator('[data-testid="chat-message"][data-sender="remote"]').last().locator("p");
+    await expect(controllerLongMessage).toHaveCount(1, { timeout: 20_000 });
+    expect(await controllerLongMessage.evaluate((node, expected) => node.textContent === expected, longRemoteMessage)).toBe(true);
+    await expect(hostLongMessage).toHaveCSS("white-space", "pre-wrap");
+    const longChatCommandRttMs = Date.now() - longChatCommandStarted;
+    expect(longChatCommandRttMs, "64 KiB remote chat acknowledgement latency").toBeLessThan(MAX_COMMAND_RTT_MS);
 
     const markupMessage = `<img src=x onerror="window.__zuradioChatExecuted=true">`;
     await controller.getByTestId("remote-chat-input").fill(markupMessage);
@@ -176,10 +205,18 @@ test("streams from the laptop while enforcing listener and controller roles", as
     await expect(host.getByTestId("host-chat").locator("img")).toHaveCount(0);
     expect(await host.evaluate(() => (window as Window & { __zuradioChatExecuted?: boolean }).__zuradioChatExecuted)).toBeUndefined();
 
-    const localMessage = `Laptop reply ${Date.now()}`;
+    const localMessage = (`Laptop long reply ${Date.now()}\n${"local checkpoint\n".repeat(1_500)}`).slice(0, 20_000);
     await host.getByTestId("host-chat-input").fill(localMessage);
+    await expect(host.getByTestId("host-chat-count")).toHaveText(
+      "20,000 / 65,536 characters · 20,000 / 65,536 UTF-8 bytes",
+    );
     await host.getByTestId("host-chat-send").click();
-    await expect(controller.locator('[data-testid="chat-message"][data-sender="local"]')).toContainText(localMessage);
+    const controllerLocalMessage = controller.locator('[data-testid="chat-message"][data-sender="local"]').last().locator("p");
+    await expect(controllerLocalMessage).toHaveCount(1, { timeout: 20_000 });
+    await expect.poll(
+      () => controllerLocalMessage.evaluate((node, expected) => node.textContent === expected, localMessage),
+      { timeout: 20_000 },
+    ).toBe(true);
     await controller.screenshot({ path: "test-results/mobile-controller-chat.png", fullPage: true });
 
     host.once("dialog", (dialog) => dialog.accept());
@@ -352,7 +389,17 @@ test("streams from the laptop while enforcing listener and controller roles", as
     await expect(listener.getByTestId("connect-listen")).toBeVisible();
     await test.info().attach("latency-metrics.json", {
       body: JSON.stringify(
-        { listenerConnectMs, controllerConnectMs, switchToUploadMs, switchToControlMs, commandRttMs, trustedConnectMs, trustedCommandRttMs },
+        {
+          listenerConnectMs,
+          controllerConnectMs,
+          switchToUploadMs,
+          switchToControlMs,
+          chatCommandRttMs,
+          longChatCommandRttMs,
+          commandRttMs,
+          trustedConnectMs,
+          trustedCommandRttMs,
+        },
         null,
         2,
       ),

@@ -2,6 +2,7 @@ import "./style.css";
 
 import { ZuradioApi } from "./api";
 import { AudioEngine } from "./audio-engine";
+import { chatCounterText, chatLimitError, chatTextFits, LONG_CHAT_LIMITS } from "./chat";
 import { icon, type IconName } from "./icons";
 import type {
   Action,
@@ -135,6 +136,7 @@ root.addEventListener("input", (event) => {
     render();
   } else if (target.matches("[data-chat-input]")) {
     chatDraft = target.value;
+    updateChatComposer();
   } else if (target.matches("[data-seek]")) {
     positionMs = Number(target.value);
     updateProgress();
@@ -534,6 +536,12 @@ async function postChat(form: HTMLFormElement): Promise<void> {
   const input = form.elements.namedItem("message") as HTMLTextAreaElement;
   const text = input.value.trim();
   if (!text) return;
+  const error = chatLimitError(input.value, LONG_CHAT_LIMITS);
+  input.setCustomValidity(error);
+  if (error) {
+    input.reportValidity();
+    return;
+  }
   await perform({ kind: "chat_post", text }, false);
   chatDraft = "";
   render();
@@ -829,7 +837,8 @@ function renderChat(state: AppSnapshot): string {
     </div>
     <form class="chat-compose" data-chat-form>
       <label for="host-chat-message">Message</label>
-      <div><textarea id="host-chat-message" name="message" data-chat-input data-testid="host-chat-input" rows="2" maxlength="300" required placeholder="Write a message to the connected remote browser">${escapeHtml(chatDraft)}</textarea><button class="primary" data-testid="host-chat-send" ${disabled()}>Send</button></div>
+      <div><textarea id="host-chat-message" name="message" data-chat-input data-testid="host-chat-input" rows="4" maxlength="${LONG_CHAT_LIMITS.maxCharacters}" required placeholder="Write a message to the connected remote browser">${escapeHtml(chatDraft)}</textarea><button class="primary" data-testid="host-chat-send" ${busy || !chatTextFits(chatDraft, LONG_CHAT_LIMITS) ? "disabled" : ""}>Send</button></div>
+      <output class="chat-count" data-chat-count data-testid="host-chat-count" for="host-chat-message">${chatCounterText(chatDraft, LONG_CHAT_LIMITS)}</output>
       <p>Chat carries text only. It cannot run commands or transfer files.</p>
     </form>
   </section>`;
@@ -842,6 +851,18 @@ function renderChatMessage(entry: ChatMessage, perspective: "local" | "remote"):
     <div><strong>${sender}</strong><span><time datetime="${new Date(entry.sentAtMs).toISOString()}">${escapeHtml(formatChatTime(entry.sentAtMs))}</time><button data-action="delete-chat-message" data-message-id="${escapeAttribute(entry.id)}" aria-label="Delete message" title="Delete message" ${disabled()}>${icon("close")}</button></span></div>
     <p>${escapeHtml(entry.text)}</p>
   </article>`;
+}
+
+function updateChatComposer(): void {
+  const input = root.querySelector<HTMLTextAreaElement>("[data-chat-input]");
+  const counter = root.querySelector<HTMLOutputElement>("[data-chat-count]");
+  const send = root.querySelector<HTMLButtonElement>("[data-testid='host-chat-send']");
+  if (!input || !counter || !send) return;
+  const error = chatLimitError(input.value, LONG_CHAT_LIMITS);
+  input.setCustomValidity(error);
+  counter.textContent = chatCounterText(input.value, LONG_CHAT_LIMITS);
+  counter.classList.toggle("is-over-limit", Boolean(error));
+  send.disabled = busy || !chatTextFits(input.value, LONG_CHAT_LIMITS);
 }
 
 function renderBroadcast(): string {

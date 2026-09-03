@@ -1,4 +1,5 @@
 import VDONinja, { type VDONinjaEvent } from "@vdoninja/sdk";
+import { chatTextFits, LEGACY_CHAT_LIMITS, LONG_CHAT_LIMITS, type ChatLimits } from "./chat";
 import { deriveRendezvousRoute, type RendezvousRoute } from "./rendezvous";
 import { partitionUploadBatches } from "./upload-batches";
 import type {
@@ -32,6 +33,11 @@ const CHUNKED_SNAPSHOT_TRANSPORT = "chunked-v1";
 const SNAPSHOT_CHUNK_BYTES = 11 * 1024;
 const MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024;
 const SNAPSHOT_ASSEMBLY_TIMEOUT_MS = 30_000;
+const CHUNKED_CHAT_TRANSPORT = "chat-chunked-v1";
+const FRAMED_ACTION_CHUNK_BYTES = 11 * 1024;
+const MAX_FRAMED_ACTION_BYTES = 160 * 1024;
+const FRAMED_ACTION_ASSEMBLY_TIMEOUT_MS = 30_000;
+const MAX_PENDING_FRAMED_ACTIONS = 16;
 const BINARY_UPLOAD_BUFFER_HIGH_BYTES = 1024 * 1024;
 const BINARY_UPLOAD_BUFFER_LOW_BYTES = 512 * 1024;
 const UPLOAD_CHUNK_WINDOW = 8;
@@ -64,6 +70,7 @@ interface HostGrant {
   expiresAt: number;
   compactUploadResponses: boolean;
   chunkedSnapshots: boolean;
+  chunkedChatRequests: boolean;
 }
 
 interface PendingRequest {
@@ -115,6 +122,20 @@ interface PendingSnapshot {
   timer: ReturnType<typeof setTimeout>;
 }
 
+interface PendingFramedAction {
+  id: string;
+  transportUuid: string;
+  grantId: string;
+  peerId: string;
+  sequence: number;
+  totalBytes: number;
+  chunkCount: number;
+  nextIndex: number;
+  receivedBytes: number;
+  bytes: Uint8Array<ArrayBuffer>;
+  timer: number;
+}
+
 interface StoredTrustedDevice {
   version: 1;
   deviceId: string;
@@ -146,6 +167,7 @@ export class HostBroadcastBridge {
   private session: BroadcastSession | null = null;
   private grants = new Map<string, HostGrant>();
   private latestGrantByTransport = new Map<string, string>();
+  private pendingFramedActions = new Map<string, PendingFramedAction>();
   private controlQueue: Promise<void> = Promise.resolve();
 
   constructor(private readonly callbacks: HostBridgeCallbacks) {}
@@ -299,6 +321,7 @@ export class HostBroadcastBridge {
     this.session = null;
     this.grants.clear();
     this.latestGrantByTransport.clear();
+    this.clearPendingFramedActions();
     await this.controlQueue.catch(() => undefined);
     this.controlQueue = Promise.resolve();
     const listen = this.listen;
@@ -354,7 +377,7 @@ export class HostBroadcastBridge {
   }
 
   private async handleControl(uuid: string, raw: unknown): Promise<void> {
-    const message = parseMessage(raw);
+    let message = parseMessage(raw);
     if (!message || !this.session) return;
     try {
       if (message.type === "zuradio.hello") {
@@ -383,7 +406,10 @@ export class HostBroadcastBridge {
           trustedDevice?: { token: string; expiresAt: number } | null;
         };
         const previousGrantId = this.latestGrantByTransport.get(uuid);
-        if (previousGrantId) this.grants.delete(previousGrantId);
+        if (previousGrantId) {
+          this.grants.delete(previousGrantId);
+          this.clearPendingFramedActions(previousGrantId);
+        }
         this.latestGrantByTransport.set(uuid, response.grantId);
         this.grants.set(response.grantId, {
           grantId: response.grantId,
@@ -393,6 +419,7 @@ export class HostBroadcastBridge {
           expiresAt: Date.now() + response.expiresInSeconds * 1_000,
           compactUploadResponses: message.uploadResponse === COMPACT_UPLOAD_RESPONSE,
           chunkedSnapshots: message.snapshotTransport === CHUNKED_SNAPSHOT_TRANSPORT,
+          chunkedChatRequests: message.chatTransport === CHUNKED_CHAT_TRANSPORT,
         });
         const chunkedSnapshots = mode === "control" && message.snapshotTransport === CHUNKED_SNAPSHOT_TRANSPORT;
         const readySent = this.control?.sendData(
@@ -406,6 +433,10 @@ export class HostBroadcastBridge {
             trustedDevice: response.trustedDevice ?? null,
             uploadTransport: mode === "upload" ? BINARY_UPLOAD_TRANSPORT : null,
             snapshotTransport: chunkedSnapshots ? CHUNKED_SNAPSHOT_TRANSPORT : null,
+            chatTransport:
+              mode === "control" && message.chatTransport === CHUNKED_CHAT_TRANSPORT
+                ? CHUNKED_CHAT_TRANSPORT
+                : null,
             audio:
               mode === "upload"
                 ? null
@@ -423,20 +454,15 @@ export class HostBroadcastBridge {
         if (chunkedSnapshots) this.sendSnapshot(uuid, this.callbacks.snapshot());
         return;
       }
-      const suppliedGrantId =
-        typeof message.grantId === "string" ? stringField(message, "grantId", 256) : null;
-      const grantId = suppliedGrantId ?? this.latestGrantByTransport.get(uuid);
-      const grant = grantId ? this.grants.get(grantId) : null;
-      if (
-        !grant ||
-        grant.transportUuid !== uuid ||
-        stringField(message, "peerId", 128) !== grant.peerId ||
-        grant.expiresAt <= Date.now()
-      ) {
-        throw new Error("This browser is not authenticated");
+      if (message.type.startsWith("zuradio.action.")) {
+        const framed = this.consumeFramedAction(uuid, message);
+        if (!framed) return;
+        message = framed;
       }
+      const grant = this.authenticatedGrant(uuid, message);
       if (message.type === "zuradio.goodbye") {
         this.grants.delete(grant.grantId);
+        this.clearPendingFramedActions(grant.grantId);
         if (this.latestGrantByTransport.get(uuid) === grant.grantId) {
           this.latestGrantByTransport.delete(uuid);
         }
@@ -483,11 +509,135 @@ export class HostBroadcastBridge {
         if (snapshot) this.publishState(snapshot);
       }
     } catch (error) {
+      if (message.type.startsWith("zuradio.action.")) this.discardPendingFramedAction(uuid, message);
       const reason = error instanceof Error ? error.message : "Remote request failed";
       this.control?.sendData(
         { type: "zuradio.rejected", message: reason, sequence: message.sequence ?? null },
         { uuid, preference: "all", allowFallback: false },
       );
+    }
+  }
+
+  private authenticatedGrant(uuid: string, message: MessageRecord): HostGrant {
+    const suppliedGrantId =
+      typeof message.grantId === "string" ? stringField(message, "grantId", 256) : null;
+    const grantId = suppliedGrantId ?? this.latestGrantByTransport.get(uuid);
+    const grant = grantId ? this.grants.get(grantId) : null;
+    if (
+      !grant ||
+      grant.transportUuid !== uuid ||
+      stringField(message, "peerId", 128) !== grant.peerId ||
+      grant.expiresAt <= Date.now()
+    ) {
+      throw new Error("This browser is not authenticated");
+    }
+    return grant;
+  }
+
+  private consumeFramedAction(uuid: string, message: MessageRecord): MessageRecord | null {
+    const grant = this.authenticatedGrant(uuid, message);
+    if (grant.mode !== "control" || !grant.chunkedChatRequests) {
+      throw new Error("This grant cannot send framed chat messages");
+    }
+    const requestId = stringField(message, "requestId", 80);
+    const sequence = numberField(message, "sequence");
+    const key = framedActionKey(uuid, requestId);
+
+    if (message.type === "zuradio.action.begin") {
+      const totalBytes = numberField(message, "totalBytes");
+      const chunkCount = numberField(message, "chunkCount");
+      if (
+        totalBytes > MAX_FRAMED_ACTION_BYTES ||
+        chunkCount !== Math.ceil(totalBytes / FRAMED_ACTION_CHUNK_BYTES)
+      ) {
+        throw new Error("Framed chat declaration is invalid");
+      }
+      this.clearPendingFramedActions(undefined, uuid);
+      if (this.pendingFramedActions.size >= MAX_PENDING_FRAMED_ACTIONS) {
+        throw new Error("Too many framed chat messages are pending");
+      }
+      const timer = window.setTimeout(() => {
+        const pending = this.pendingFramedActions.get(key);
+        if (!pending) return;
+        this.pendingFramedActions.delete(key);
+      }, FRAMED_ACTION_ASSEMBLY_TIMEOUT_MS);
+      this.pendingFramedActions.set(key, {
+        id: requestId,
+        transportUuid: uuid,
+        grantId: grant.grantId,
+        peerId: grant.peerId,
+        sequence,
+        totalBytes,
+        chunkCount,
+        nextIndex: 0,
+        receivedBytes: 0,
+        bytes: new Uint8Array(totalBytes),
+        timer,
+      });
+      return null;
+    }
+
+    const pending = this.pendingFramedActions.get(key);
+    if (
+      !pending ||
+      pending.grantId !== grant.grantId ||
+      pending.peerId !== grant.peerId ||
+      pending.sequence !== sequence
+    ) {
+      throw new Error("Framed chat is not bound to an active request");
+    }
+    if (message.type === "zuradio.action.chunk") {
+      const index = nonnegativeNumberField(message, "index");
+      if (index !== pending.nextIndex || index >= pending.chunkCount) {
+        throw new Error("Framed chat chunk order is invalid");
+      }
+      const encoded = stringField(message, "data", 16_000);
+      const bytes = decodeBase64(encoded);
+      const expectedLength = Math.min(
+        FRAMED_ACTION_CHUNK_BYTES,
+        pending.totalBytes - pending.receivedBytes,
+      );
+      if (bytes.length !== expectedLength) throw new Error("Framed chat chunk length is invalid");
+      pending.bytes.set(bytes, pending.receivedBytes);
+      pending.receivedBytes += bytes.length;
+      pending.nextIndex += 1;
+      return null;
+    }
+    if (message.type !== "zuradio.action.end") throw new Error("Framed chat frame type is invalid");
+    if (pending.nextIndex !== pending.chunkCount || pending.receivedBytes !== pending.totalBytes) {
+      throw new Error("Framed chat ended before every chunk arrived");
+    }
+    window.clearTimeout(pending.timer);
+    this.pendingFramedActions.delete(key);
+    const decoded = new TextDecoder("utf-8", { fatal: true }).decode(pending.bytes);
+    const action = parseMessage(decoded, MAX_FRAMED_ACTION_BYTES);
+    if (
+      !action ||
+      !isFramedChatAction(action) ||
+      action.grantId !== pending.grantId ||
+      action.peerId !== pending.peerId ||
+      action.sequence !== pending.sequence
+    ) {
+      throw new Error("Framed chat contents are invalid");
+    }
+    return action;
+  }
+
+  private discardPendingFramedAction(uuid: string, message: MessageRecord): void {
+    if (typeof message.requestId !== "string") return;
+    const key = framedActionKey(uuid, message.requestId);
+    const pending = this.pendingFramedActions.get(key);
+    if (!pending) return;
+    window.clearTimeout(pending.timer);
+    this.pendingFramedActions.delete(key);
+  }
+
+  private clearPendingFramedActions(grantId?: string, transportUuid?: string): void {
+    for (const [key, pending] of this.pendingFramedActions) {
+      if (grantId && pending.grantId !== grantId) continue;
+      if (transportUuid && pending.transportUuid !== transportUuid) continue;
+      window.clearTimeout(pending.timer);
+      this.pendingFramedActions.delete(key);
     }
   }
 
@@ -540,6 +690,7 @@ export class HostBroadcastBridge {
     for (const [grantId, grant] of this.grants) {
       if (grant.expiresAt > now) continue;
       this.grants.delete(grantId);
+      this.clearPendingFramedActions(grantId);
       if (this.latestGrantByTransport.get(grant.transportUuid) === grantId) {
         this.latestGrantByTransport.delete(grant.transportUuid);
       }
@@ -562,6 +713,7 @@ export class CompanionBridge {
   private peerId = crypto.randomUUID();
   private sequence = 1;
   private uploadTransport: "binary-v1" | "json-v1" = "json-v1";
+  private chunkedChatRequests = false;
   private uploadChannel: RTCDataChannel | null = null;
   private revision = 0;
   private ready = false;
@@ -613,6 +765,10 @@ export class CompanionBridge {
 
   get hasTrustedDevice(): boolean {
     return readTrustedDevice() !== null;
+  }
+
+  get chatLimits(): ChatLimits {
+    return this.chunkedChatRequests ? LONG_CHAT_LIMITS : LEGACY_CHAT_LIMITS;
   }
 
   readSpectrum(target: Uint8Array): boolean {
@@ -979,6 +1135,7 @@ export class CompanionBridge {
     this.helloSending = false;
     this.sequence = 1;
     this.uploadTransport = "json-v1";
+    this.chunkedChatRequests = false;
     this.uploadChannel = null;
     this.pendingServerProof = null;
     this.pendingHello = null;
@@ -1114,6 +1271,7 @@ export class CompanionBridge {
             ...(auth.kind === "device" ? { deviceToken: auth.trusted.token } : {}),
             ...(invitation.mode === "upload" ? { uploadResponse: COMPACT_UPLOAD_RESPONSE } : {}),
             ...(invitation.mode === "control" ? { snapshotTransport: CHUNKED_SNAPSHOT_TRANSPORT } : {}),
+            ...(invitation.mode === "control" ? { chatTransport: CHUNKED_CHAT_TRANSPORT } : {}),
           },
           serverProof,
         };
@@ -1152,6 +1310,7 @@ export class CompanionBridge {
       this.grantId = stringField(message, "grantId", 256);
       this.grantExpiresAt = Date.now() + numberField(message, "expiresInSeconds") * 1_000;
       this.uploadTransport = message.uploadTransport === BINARY_UPLOAD_TRANSPORT ? "binary-v1" : "json-v1";
+      this.chunkedChatRequests = message.chatTransport === CHUNKED_CHAT_TRANSPORT;
       if (
         this.connectionAuth?.kind === "password" &&
         this.connectionRoute &&
@@ -1529,12 +1688,48 @@ export class CompanionBridge {
     const grantId = this.grantId;
     const sequence = this.sequence;
     const pending = this.registerRequest(sequence, timeout, description);
-    const sent = control.sendData(
-      { type, grantId, peerId: this.peerId, sequence, ...payload },
-      { uuid: controlPeerUuid, allowFallback: false },
-    );
+    const message = { type, grantId, peerId: this.peerId, sequence, ...payload };
+    const messageBytes = new TextEncoder().encode(JSON.stringify(message));
+    const target = { uuid: controlPeerUuid, allowFallback: false };
+    let sent = false;
+    if (messageBytes.length <= MAX_MESSAGE_BYTES) {
+      sent = control.sendData(message, target);
+    } else if (
+      this.chunkedChatRequests &&
+      messageBytes.length <= MAX_FRAMED_ACTION_BYTES &&
+      isFramedChatAction(message as MessageRecord)
+    ) {
+      const requestId = `action-${crypto.randomUUID()}`;
+      const chunkCount = Math.ceil(messageBytes.length / FRAMED_ACTION_CHUNK_BYTES);
+      const frameIdentity = { grantId, peerId: this.peerId, sequence, requestId };
+      sent = control.sendData(
+        {
+          type: "zuradio.action.begin",
+          ...frameIdentity,
+          totalBytes: messageBytes.length,
+          chunkCount,
+        },
+        target,
+      );
+      for (let index = 0; sent && index < chunkCount; index += 1) {
+        const start = index * FRAMED_ACTION_CHUNK_BYTES;
+        sent = control.sendData(
+          {
+            type: "zuradio.action.chunk",
+            ...frameIdentity,
+            index,
+            data: encodeBase64(messageBytes.subarray(start, Math.min(messageBytes.length, start + FRAMED_ACTION_CHUNK_BYTES))),
+          },
+          target,
+        );
+      }
+      if (sent) sent = control.sendData({ type: "zuradio.action.end", ...frameIdentity }, target);
+    }
     if (!sent) {
-      this.rejectRequest(sequence, new Error("Remote data channel is not ready"));
+      const reason = messageBytes.length > MAX_MESSAGE_BYTES
+        ? "The chat message exceeds the negotiated secure transport limit"
+        : "Remote data channel is not ready";
+      this.rejectRequest(sequence, new Error(reason));
       return pending;
     }
     this.sequence += 1;
@@ -1721,10 +1916,26 @@ function uploadOperationDescription(operation: UploadOperation): string {
   }
 }
 
-function parseMessage(raw: unknown): MessageRecord | null {
+function framedActionKey(uuid: string, requestId: string): string {
+  return `${uuid}\u0000${requestId}`;
+}
+
+function isFramedChatAction(message: MessageRecord): boolean {
+  if (message.type !== "zuradio.action") return false;
+  const request = message.request;
+  if (!request || typeof request !== "object" || Array.isArray(request)) return false;
+  const action = (request as Record<string, unknown>).action;
+  if (!action || typeof action !== "object" || Array.isArray(action)) return false;
+  const record = action as Record<string, unknown>;
+  return record.kind === "chat_post"
+    && typeof record.text === "string"
+    && chatTextFits(record.text, LONG_CHAT_LIMITS);
+}
+
+function parseMessage(raw: unknown, maximumBytes = MAX_MESSAGE_BYTES): MessageRecord | null {
   let value = raw;
   if (typeof raw === "string") {
-    if (new TextEncoder().encode(raw).byteLength > MAX_MESSAGE_BYTES) return null;
+    if (new TextEncoder().encode(raw).byteLength > maximumBytes) return null;
     try {
       value = JSON.parse(raw);
     } catch {
@@ -1732,7 +1943,7 @@ function parseMessage(raw: unknown): MessageRecord | null {
     }
   } else {
     try {
-      if (new TextEncoder().encode(JSON.stringify(raw)).byteLength > MAX_MESSAGE_BYTES) return null;
+      if (new TextEncoder().encode(JSON.stringify(raw)).byteLength > maximumBytes) return null;
     } catch {
       return null;
     }

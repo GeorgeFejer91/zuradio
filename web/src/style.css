@@ -2511,6 +2511,18 @@ button .ui-icon {
   min-width: 88px;
 }
 
+.chat-count {
+  display: block;
+  margin-top: 7px;
+  color: #8e8e89;
+  font-size: 11px;
+  font-variant-numeric: tabular-nums;
+}
+
+.chat-count.is-over-limit {
+  color: var(--danger);
+}
+
 .chat-compose > p {
   margin: 7px 0 0;
   color: #777772;

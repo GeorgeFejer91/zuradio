@@ -15,8 +15,8 @@ const PROTOCOL_VERSION: u16 = 1;
 const MAX_COMMAND_CACHE: usize = 256;
 const MAX_HISTORY: usize = 500;
 const MAX_CHAT_MESSAGES: usize = 20;
-const MAX_CHAT_MESSAGE_CHARS: usize = 300;
-const MAX_CHAT_MESSAGE_BYTES: usize = 320;
+const MAX_CHAT_MESSAGE_CHARS: usize = 64 * 1024;
+const MAX_CHAT_MESSAGE_BYTES: usize = 64 * 1024;
 
 #[derive(Debug)]
 pub struct ZuradioCore {
@@ -331,7 +331,8 @@ impl ZuradioCore {
                 .any(|character| character.is_control() && character != '\n' && character != '\t')
         {
             return Err(CoreError::InvalidInput(
-                "chat messages must contain 1 to 300 characters and at most 320 UTF-8 bytes".into(),
+                "chat messages must contain 1 to 65,536 characters and at most 65,536 UTF-8 bytes"
+                    .into(),
             ));
         }
         let sender = match role {
@@ -996,6 +997,24 @@ mod tests {
     }
 
     #[test]
+    fn chat_accepts_a_full_64_kib_multiline_message() -> Result<(), CoreError> {
+        let mut core = ZuradioCore::in_memory()?;
+        let mut text = "line one\n".repeat((MAX_CHAT_MESSAGE_BYTES / 9) + 1);
+        text.truncate(MAX_CHAT_MESSAGE_BYTES - 1);
+        text.push('x');
+        assert_eq!(text.len(), MAX_CHAT_MESSAGE_BYTES);
+        assert!(text.contains('\n'));
+
+        core.execute(request(
+            core.snapshot()?.revision,
+            Action::ChatPost { text: text.clone() },
+        ))?;
+
+        assert_eq!(core.snapshot()?.chat_messages[0].text, text);
+        Ok(())
+    }
+
+    #[test]
     fn chat_enforces_content_and_clear_authorization() -> Result<(), CoreError> {
         let mut core = ZuradioCore::in_memory()?;
         let revision = core.snapshot()?.revision;
@@ -1013,6 +1032,15 @@ mod tests {
                 revision,
                 Action::ChatPost {
                     text: "x".repeat(MAX_CHAT_MESSAGE_CHARS + 1),
+                },
+            )),
+            Err(CoreError::InvalidInput(_))
+        ));
+        assert!(matches!(
+            core.execute(request(
+                revision,
+                Action::ChatPost {
+                    text: "é".repeat((MAX_CHAT_MESSAGE_BYTES / 2) + 1),
                 },
             )),
             Err(CoreError::InvalidInput(_))

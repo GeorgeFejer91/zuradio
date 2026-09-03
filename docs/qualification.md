@@ -9,6 +9,26 @@ complete CLI, dedicated Chromium WebRTC app window, least-privilege Tauri
 fallback, Debian package, AppImage, and public Web Companion. Native packages remain unsigned, and physical-phone,
 forced-TURN, and endurance qualification remain release-channel gates.
 
+### 2026-09-03 long-chat framing and recognition addendum
+
+- Local and authenticated Control chat now accepts up to 65,536 Unicode
+  characters and 65,536 UTF-8 bytes, preserves multiline formatting, and shows
+  live character/byte counters. Messages that exceed the ordinary 16 KiB
+  control-frame ceiling use authenticated, ordered, bounded request framing;
+  partial messages are never published.
+- The focused transfer gate remained byte-exact for 9,729,283 source bytes:
+  first catalogue publication in 2,537 ms, deterministic recognition in 5,359
+  ms, upload at 1,822,304 B/s, download at 38,455,664 B/s, and two originals in
+  the visible organized library.
+- The subsequent full browser gate passed all 27 scenarios in 6.6 minutes
+  across Chromium, Firefox, and WebKit. It included exact 64 KiB remote chat,
+  UTF-8 byte overflow rejection, bidirectional multiline delivery, the complete
+  transfer/resume suite, and the normal latency ceilings.
+- The installed SongRec 0.7.5 helper has complete dynamic linkage. All eight
+  current catalogue entries reached a terminal acoustic-recognition state:
+  five `recognized` and three legitimate `no_match`, with no pending,
+  unavailable, or error result.
+
 ### 2026-09-03 transfer visibility, resume, and large-catalogue addendum
 
 - Upload mode now keeps a visible transfer panel on both the laptop and Web

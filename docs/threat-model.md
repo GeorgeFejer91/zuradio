@@ -48,8 +48,18 @@ but does not receive arbitrary filesystem or process authority.
   the beacon or stopping the host revokes its complete epoch.
 - Validate one versioned JSON schema. Reject unknown actions and unknown fields.
 - Treat chat as bounded inert text: derive its local/remote sender from the
-  Rust-authorized role, escape it at every HTML render, retain only the latest
-  20 messages, permit posting only to Control, and permit deletion/clearing only locally.
+  Rust-authorized role, escape it at every HTML render, cap each message at
+  65,536 characters and 65,536 UTF-8 bytes, retain only the latest 20 messages,
+  permit posting only to Control, and permit deletion/clearing only locally.
+- Negotiate large-chat framing only for authenticated Control grants. Bind every
+  frame to the same transport UUID, grant, peer, request ID, and replay sequence;
+  require ordered exact-length chunks, valid base64/UTF-8/JSON, a 160 KiB action
+  envelope cap, a 30-second deadline, one pending assembly per transport, and a
+  global assembly bound. Reassembled input may contain only the closed
+  `chat_post` action and must pass Rust's 64 KiB validation before atomic
+  publication. Stop, expiry, replacement, malformed frames, and authenticated
+  goodbye discard incomplete assemblies; an abrupt transport loss leaves only
+  inert bounded state that expires within 30 seconds.
 - Frame authenticated controller snapshots below the 16 KiB control-message
   ceiling. Bound the complete assembly to 64 MiB and 30 seconds; require one
   transfer identity, declared revision, exact chunk count/length, valid base64,

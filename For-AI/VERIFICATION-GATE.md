@@ -24,7 +24,10 @@ Low latency, fast connection establishment, and immediate UI feedback are absolu
 1. Add or update a Playwright scenario under `web/tests/e2e/` for every changed user workflow, regression, permission boundary, or responsive UI state. Assert the outcome a user experiences, not merely an HTTP response or implementation detail.
    Chat changes must prove remote-to-local and local-to-remote publication,
    Rust-derived sender identity, Listener/Upload exclusion, local-only deletion/clearing,
-   persistence bounds, HTML-safe rendering, and the command latency ceiling.
+   persistence bounds, HTML-safe multiline rendering, live character/UTF-8 byte
+   counters, exact 64 KiB acceptance, byte-cap rejection, authenticated ordered
+   request framing below the 16 KiB control-message ceiling, atomic publication,
+   and the command latency ceiling.
    The controller gate must also seed a canonical snapshot larger than the
    16 KiB control-message ceiling, then prove bounded framed reassembly exposes
    the complete library and latest 20 chat messages within the connection

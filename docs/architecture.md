@@ -80,8 +80,8 @@ The persistent model covers tracks, artists, albums, playlists and ordered
 playlist entries, favorites, play history, the active queue, shuffle/repeat
 configuration, last-known player state, and the latest 20 chat messages. Chat
 sender labels are assigned from the Rust-authorized actor role, each message is
-bounded to 300 characters and 320 UTF-8 bytes, and only the local operator can
-delete messages or clear the board. Rebuildable scanner data is kept
+bounded to 65,536 characters and 65,536 UTF-8 bytes, and only the local operator
+can delete messages or clear the board. Rebuildable scanner data is kept
 separate from user-authored state. Canonical client snapshots contain only
 currently playable tracks; unavailable database rows remain internal so saved
 playlist and history references are not erased when a mount moves or a managed
@@ -95,6 +95,17 @@ base64 framing, UTF-8, JSON shape, and a 30-second assembly deadline, and only
 then exposes the controller as ready. This keeps large libraries and the latest
 chat on the direct authenticated data channel without relaxing ordinary command
 bounds.
+
+Control peers separately negotiate framed chat actions. A message whose typed
+action envelope exceeds the 16 KiB control-message ceiling is serialized once
+and divided into ordered 11 KiB byte chunks. Every frame repeats and validates
+the authenticated grant, peer, and command sequence. The host permits one
+in-flight assembly per transport, at most 16 globally, caps the escaped action
+envelope at 160 KiB, expires incomplete assemblies after 30 seconds, accepts
+only `chat_post`, and forwards it to Rust only after exact byte counts, base64,
+UTF-8, JSON shape, identity, and the 64 KiB message limit pass. Partial text is
+never published. Both chat composers display live character and UTF-8 byte
+counters and preserve multiline rendering.
 
 Remote uploads are transactional per file: the Rust daemon validates a declared
 selection, accepts raw frames of up to 64 KiB on a dedicated ordered WebRTC
