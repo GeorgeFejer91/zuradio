@@ -218,6 +218,11 @@ receiver catalogue acknowledgement is appended and synced to the JSONL ledger,
 which contains no source-root path. A retry selects only hashes that do not yet
 have a durable acknowledgement.
 
+Authenticated Control snapshots are framed into ordered messages below the
+16 KiB control ceiling and reassembled under a 64 MiB, 30-second bound before
+the controller is declared ready. This keeps the full library and latest chat
+available when a real catalogue no longer fits one WebRTC message.
+
 ## Broadcast to a phone
 
 1. Log in to this computer. Zuradio opens automatically, rotates any stale

@@ -28,6 +28,10 @@ const BINARY_UPLOAD_CHANNEL = "zuradio-upload-v1";
 const BINARY_UPLOAD_CHANNEL_LABEL = `x-${BINARY_UPLOAD_CHANNEL}`;
 const BINARY_UPLOAD_TRANSPORT = "binary-v1";
 const COMPACT_UPLOAD_RESPONSE = "compact-v1";
+const CHUNKED_SNAPSHOT_TRANSPORT = "chunked-v1";
+const SNAPSHOT_CHUNK_BYTES = 11 * 1024;
+const MAX_SNAPSHOT_BYTES = 64 * 1024 * 1024;
+const SNAPSHOT_ASSEMBLY_TIMEOUT_MS = 30_000;
 const BINARY_UPLOAD_BUFFER_HIGH_BYTES = 1024 * 1024;
 const BINARY_UPLOAD_BUFFER_LOW_BYTES = 512 * 1024;
 const UPLOAD_CHUNK_WINDOW = 8;
@@ -59,6 +63,7 @@ interface HostGrant {
   mode: RemoteMode;
   expiresAt: number;
   compactUploadResponses: boolean;
+  chunkedSnapshots: boolean;
 }
 
 interface PendingRequest {
@@ -98,6 +103,16 @@ interface AudioRoute {
 interface PendingHello {
   message: MessageRecord;
   serverProof: string;
+}
+
+interface PendingSnapshot {
+  id: string;
+  revision: number;
+  totalBytes: number;
+  chunks: Array<Uint8Array<ArrayBuffer> | null>;
+  receivedBytes: number;
+  receivedChunks: number;
+  timer: ReturnType<typeof setTimeout>;
 }
 
 interface StoredTrustedDevice {
@@ -231,12 +246,53 @@ export class HostBroadcastBridge {
     this.pruneGrants();
     for (const grant of this.grants.values()) {
       if (grant.mode === "control") {
-        this.control?.sendData(
-          { type: "zuradio.snapshot", snapshot },
-          { uuid: grant.transportUuid, preference: "all", allowFallback: false },
-        );
+        if (grant.chunkedSnapshots) {
+          try {
+            this.sendSnapshot(grant.transportUuid, snapshot);
+          } catch (error) {
+            this.callbacks.onError(error instanceof Error ? error.message : "Controller snapshot transfer failed");
+          }
+        } else {
+          this.control?.sendData(
+            { type: "zuradio.snapshot", snapshot },
+            { uuid: grant.transportUuid, preference: "all", allowFallback: false },
+          );
+        }
       }
     }
+  }
+
+  private sendSnapshot(uuid: string, snapshot: AppSnapshot): void {
+    if (!this.control) throw new Error("Controller snapshot channel is unavailable");
+    const bytes = new TextEncoder().encode(JSON.stringify(snapshot));
+    if (bytes.length < 1 || bytes.length > MAX_SNAPSHOT_BYTES) {
+      throw new Error("Controller snapshot exceeds the 64 MiB safety limit");
+    }
+    const snapshotId = `snapshot-${crypto.randomUUID()}`;
+    const chunkCount = Math.ceil(bytes.length / SNAPSHOT_CHUNK_BYTES);
+    const target = { uuid, allowFallback: false };
+    const send = (message: Record<string, unknown>) => {
+      if (!this.control?.sendData(message, target)) {
+        throw new Error("Controller snapshot data channel is unavailable");
+      }
+    };
+    send({
+      type: "zuradio.snapshot.begin",
+      snapshotId,
+      revision: snapshot.revision,
+      totalBytes: bytes.length,
+      chunkCount,
+    });
+    for (let index = 0; index < chunkCount; index += 1) {
+      const start = index * SNAPSHOT_CHUNK_BYTES;
+      send({
+        type: "zuradio.snapshot.chunk",
+        snapshotId,
+        index,
+        data: encodeBase64(bytes.subarray(start, Math.min(bytes.length, start + SNAPSHOT_CHUNK_BYTES))),
+      });
+    }
+    send({ type: "zuradio.snapshot.end", snapshotId });
   }
 
   async stop(): Promise<void> {
@@ -336,8 +392,10 @@ export class HostBroadcastBridge {
           mode,
           expiresAt: Date.now() + response.expiresInSeconds * 1_000,
           compactUploadResponses: message.uploadResponse === COMPACT_UPLOAD_RESPONSE,
+          chunkedSnapshots: message.snapshotTransport === CHUNKED_SNAPSHOT_TRANSPORT,
         });
-        this.control?.sendData(
+        const chunkedSnapshots = mode === "control" && message.snapshotTransport === CHUNKED_SNAPSHOT_TRANSPORT;
+        const readySent = this.control?.sendData(
           {
             type: "zuradio.ready",
             grantId: response.grantId,
@@ -347,6 +405,7 @@ export class HostBroadcastBridge {
             scopes: response.scopes,
             trustedDevice: response.trustedDevice ?? null,
             uploadTransport: mode === "upload" ? BINARY_UPLOAD_TRANSPORT : null,
+            snapshotTransport: chunkedSnapshots ? CHUNKED_SNAPSHOT_TRANSPORT : null,
             audio:
               mode === "upload"
                 ? null
@@ -355,11 +414,13 @@ export class HostBroadcastBridge {
                     stream: this.session.listenStream,
                     transportKey: this.session.listenTransportKey,
                   },
-            snapshot: mode === "control" ? this.callbacks.snapshot() : null,
+            snapshot: mode === "control" && !chunkedSnapshots ? this.callbacks.snapshot() : null,
             state: mode === "listen" ? nowPlaying(this.callbacks.snapshot()) : null,
           },
           { uuid, preference: "all", allowFallback: false },
         );
+        if (!readySent) throw new Error("Remote authentication acknowledgement could not be sent");
+        if (chunkedSnapshots) this.sendSnapshot(uuid, this.callbacks.snapshot());
         return;
       }
       const suppliedGrantId =
@@ -511,6 +572,8 @@ export class CompanionBridge {
   private connectionRoute: RendezvousRoute | null = null;
   private pendingServerProof: string | null = null;
   private pendingHello: PendingHello | null = null;
+  private pendingSnapshot: PendingSnapshot | null = null;
+  private awaitingControlSnapshot = false;
   private pendingRequests = new Map<number, PendingRequest>();
   private readyWaiter: ReadyWaiter | null = null;
   private beaconWaiter: BeaconWaiter | null = null;
@@ -919,6 +982,8 @@ export class CompanionBridge {
     this.uploadChannel = null;
     this.pendingServerProof = null;
     this.pendingHello = null;
+    this.clearPendingSnapshot();
+    this.awaitingControlSnapshot = false;
     this.discoveryNonce = null;
     this.requestedMode = null;
     this.discoveryPeerUuids.clear();
@@ -1048,6 +1113,7 @@ export class CompanionBridge {
             deviceId,
             ...(auth.kind === "device" ? { deviceToken: auth.trusted.token } : {}),
             ...(invitation.mode === "upload" ? { uploadResponse: COMPACT_UPLOAD_RESPONSE } : {}),
+            ...(invitation.mode === "control" ? { snapshotTransport: CHUNKED_SNAPSHOT_TRANSPORT } : {}),
           },
           serverProof,
         };
@@ -1069,7 +1135,7 @@ export class CompanionBridge {
     const message = parseMessage(raw);
     if (!message) return;
     if (message.type === "zuradio.ready") {
-      if (this.ready) return;
+      if (this.ready || this.awaitingControlSnapshot) return;
       if (
         !this.invitation ||
         !this.pendingServerProof ||
@@ -1104,9 +1170,15 @@ export class CompanionBridge {
       this.connectionAuth = null;
       this.connectionRoute = null;
       if (this.invitation.mode === "control") {
-        if (!isSnapshot(message.snapshot)) throw new Error("Controller state is unavailable");
-        this.revision = message.snapshot.revision;
-        this.callbacks.onSnapshot(message.snapshot);
+        if (isSnapshot(message.snapshot)) {
+          this.revision = message.snapshot.revision;
+          this.callbacks.onSnapshot(message.snapshot);
+        } else if (message.snapshotTransport === CHUNKED_SNAPSHOT_TRANSPORT) {
+          this.awaitingControlSnapshot = true;
+          this.callbacks.onStatus("Loading laptop library…");
+        } else {
+          throw new Error("Controller state is unavailable");
+        }
       } else if (this.invitation.mode === "listen" && isPublicState(message.state)) {
         this.callbacks.onNowPlaying(message.state);
       }
@@ -1115,7 +1187,7 @@ export class CompanionBridge {
         throw new Error("Live audio route is unavailable");
       }
       if (mode === "control") {
-        this.markReady(mode);
+        if (!this.awaitingControlSnapshot) this.markReady(mode);
         void this.connectAudio(message.audio as AudioRoute).catch((error: unknown) => {
           this.callbacks.onError(error instanceof Error ? error.message : "Live audio connection failed");
         });
@@ -1123,6 +1195,8 @@ export class CompanionBridge {
       }
       if (mode === "listen") await this.connectAudio(message.audio as AudioRoute);
       this.markReady(mode);
+    } else if (message.type.startsWith("zuradio.snapshot.")) {
+      this.handleSnapshotFrame(message);
     } else if (message.type === "zuradio.snapshot" && isSnapshot(message.snapshot)) {
       this.revision = message.snapshot.revision;
       this.callbacks.onSnapshot(message.snapshot);
@@ -1169,6 +1243,111 @@ export class CompanionBridge {
       clearTimeout(this.readyWaiter.timer);
       this.readyWaiter.resolve();
       this.readyWaiter = null;
+    }
+  }
+
+  private handleSnapshotFrame(message: MessageRecord): void {
+    try {
+      if (!this.grantId || this.invitation?.mode !== "control") {
+        throw new Error("Controller snapshot arrived before authentication");
+      }
+      if (message.type === "zuradio.snapshot.begin") {
+        const snapshotId = stringField(message, "snapshotId", 80);
+        const revision = nonnegativeNumberField(message, "revision");
+        const totalBytes = numberField(message, "totalBytes");
+        const chunkCount = numberField(message, "chunkCount");
+        if (
+          totalBytes > MAX_SNAPSHOT_BYTES ||
+          chunkCount !== Math.ceil(totalBytes / SNAPSHOT_CHUNK_BYTES)
+        ) {
+          throw new Error("Controller snapshot declaration is invalid");
+        }
+        this.clearPendingSnapshot();
+        const timer = setTimeout(() => {
+          if (this.pendingSnapshot?.id !== snapshotId) return;
+          this.failPendingSnapshot("Controller snapshot transfer timed out");
+        }, SNAPSHOT_ASSEMBLY_TIMEOUT_MS);
+        this.pendingSnapshot = {
+          id: snapshotId,
+          revision,
+          totalBytes,
+          chunks: Array.from({ length: chunkCount }, () => null),
+          receivedBytes: 0,
+          receivedChunks: 0,
+          timer,
+        };
+        return;
+      }
+      const pending = this.pendingSnapshot;
+      if (!pending || stringField(message, "snapshotId", 80) !== pending.id) {
+        throw new Error("Controller snapshot frame is not bound to an active transfer");
+      }
+      if (message.type === "zuradio.snapshot.chunk") {
+        const index = nonnegativeNumberField(message, "index");
+        const encoded = stringField(message, "data", 16_000);
+        const expectedLength = Math.min(
+          SNAPSHOT_CHUNK_BYTES,
+          pending.totalBytes - index * SNAPSHOT_CHUNK_BYTES,
+        );
+        if (index >= pending.chunks.length || expectedLength < 1 || pending.chunks[index]) {
+          throw new Error("Controller snapshot chunk order is invalid");
+        }
+        const bytes = decodeBase64(encoded);
+        if (bytes.length !== expectedLength) throw new Error("Controller snapshot chunk length is invalid");
+        pending.chunks[index] = bytes;
+        pending.receivedBytes += bytes.length;
+        pending.receivedChunks += 1;
+        return;
+      }
+      if (message.type !== "zuradio.snapshot.end") {
+        throw new Error("Controller snapshot frame type is invalid");
+      }
+      if (
+        pending.receivedChunks !== pending.chunks.length ||
+        pending.receivedBytes !== pending.totalBytes
+      ) {
+        throw new Error("Controller snapshot ended before every chunk arrived");
+      }
+      const bytes = new Uint8Array(pending.totalBytes);
+      let offset = 0;
+      for (const chunk of pending.chunks) {
+        if (!chunk) throw new Error("Controller snapshot is incomplete");
+        bytes.set(chunk, offset);
+        offset += chunk.length;
+      }
+      const revision = pending.revision;
+      this.clearPendingSnapshot();
+      const snapshot = JSON.parse(new TextDecoder("utf-8", { fatal: true }).decode(bytes)) as unknown;
+      if (!isSnapshot(snapshot) || snapshot.revision !== revision) {
+        throw new Error("Controller snapshot contents are invalid");
+      }
+      if (snapshot.revision >= this.revision) {
+        this.revision = snapshot.revision;
+        this.callbacks.onSnapshot(snapshot);
+      }
+      if (this.awaitingControlSnapshot) {
+        this.awaitingControlSnapshot = false;
+        this.markReady("control");
+      }
+    } catch {
+      this.failPendingSnapshot("The laptop sent an invalid controller snapshot");
+    }
+  }
+
+  private clearPendingSnapshot(): void {
+    if (this.pendingSnapshot) clearTimeout(this.pendingSnapshot.timer);
+    this.pendingSnapshot = null;
+  }
+
+  private failPendingSnapshot(message: string): void {
+    this.clearPendingSnapshot();
+    this.awaitingControlSnapshot = false;
+    if (this.readyWaiter) {
+      clearTimeout(this.readyWaiter.timer);
+      this.readyWaiter.reject(new Error(message));
+      this.readyWaiter = null;
+    } else {
+      this.callbacks.onError(message);
     }
   }
 
@@ -1580,6 +1759,14 @@ function numberField(record: Record<string, unknown>, key: string): number {
   return value;
 }
 
+function nonnegativeNumberField(record: Record<string, unknown>, key: string): number {
+  const value = record[key];
+  if (typeof value !== "number" || !Number.isSafeInteger(value) || value < 0) {
+    throw new Error(`Invalid ${key}`);
+  }
+  return value;
+}
+
 function modeField(record: Record<string, unknown>, key: string): RemoteMode {
   const value = record[key];
   if (value !== "listen" && value !== "control" && value !== "upload") throw new Error(`Invalid ${key}`);
@@ -1761,6 +1948,16 @@ function encodeBase64Url(bytes: Uint8Array): string {
 function decodeBase64Url(value: string): Uint8Array<ArrayBuffer> {
   const padded = value.replaceAll("-", "+").replaceAll("_", "/").padEnd(Math.ceil(value.length / 4) * 4, "=");
   const binary = atob(padded);
+  const bytes = new Uint8Array(binary.length);
+  for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
+  return bytes;
+}
+
+function decodeBase64(value: string): Uint8Array<ArrayBuffer> {
+  if (!/^[A-Za-z0-9+/]*={0,2}$/.test(value) || value.length % 4 !== 0) {
+    throw new Error("Invalid base64 data");
+  }
+  const binary = atob(value);
   const bytes = new Uint8Array(binary.length);
   for (let index = 0; index < binary.length; index += 1) bytes[index] = binary.charCodeAt(index);
   return bytes;

@@ -25,6 +25,10 @@ Low latency, fast connection establishment, and immediate UI feedback are absolu
    Chat changes must prove remote-to-local and local-to-remote publication,
    Rust-derived sender identity, Listener/Upload exclusion, local-only deletion/clearing,
    persistence bounds, HTML-safe rendering, and the command latency ceiling.
+   The controller gate must also seed a canonical snapshot larger than the
+   16 KiB control-message ceiling, then prove bounded framed reassembly exposes
+   the complete library and latest 20 chat messages within the connection
+   latency ceiling.
 2. Build the optimized Rust daemon and production web assets. The repository
    gate scripts also rebuild these bytes themselves; a merely existing release
    executable or `web/dist` directory is not freshness evidence.

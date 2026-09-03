@@ -87,6 +87,15 @@ currently playable tracks; unavailable database rows remain internal so saved
 playlist and history references are not erased when a mount moves or a managed
 file is migrated.
 
+Control peers advertise bounded snapshot framing during authentication. The
+host serializes canonical state once, divides it into ordered 11 KiB byte
+chunks, and sends each below the 16 KiB JSON control-message ceiling. The peer
+accepts at most 64 MiB, verifies the declared revision, exact byte/chunk counts,
+base64 framing, UTF-8, JSON shape, and a 30-second assembly deadline, and only
+then exposes the controller as ready. This keeps large libraries and the latest
+chat on the direct authenticated data channel without relaxing ordinary command
+bounds.
+
 Remote uploads are transactional per file: the Rust daemon validates a declared
 selection, accepts raw frames of up to 64 KiB on a dedicated ordered WebRTC
 binary channel with negotiated-size checks and sender backpressure, and verifies

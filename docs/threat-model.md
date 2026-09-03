@@ -50,6 +50,11 @@ but does not receive arbitrary filesystem or process authority.
 - Treat chat as bounded inert text: derive its local/remote sender from the
   Rust-authorized role, escape it at every HTML render, retain only the latest
   20 messages, permit posting only to Control, and permit deletion/clearing only locally.
+- Frame authenticated controller snapshots below the 16 KiB control-message
+  ceiling. Bound the complete assembly to 64 MiB and 30 seconds; require one
+  transfer identity, declared revision, exact chunk count/length, valid base64,
+  UTF-8, and canonical snapshot shape before making Control ready. Never accept
+  these frames on Listener, Upload, rendezvous, or an unauthenticated route.
 - Resolve media IDs through the catalog. Never accept a remote path. Canonicalize
   scan roots, reject escapes and special files, and handle symlinks explicitly.
 - Stage uploads beneath the private data directory; constrain count, per-file

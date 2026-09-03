@@ -365,6 +365,90 @@ test("streams from the laptop while enforcing listener and controller roles", as
   }
 });
 
+test("loads a controller snapshot larger than one bounded WebRTC message", async ({ browser }) => {
+  test.setTimeout(150_000);
+  const host = await browser.newPage();
+  const controllerContext = await browser.newContext();
+  const controller = await controllerContext.newPage();
+  const playlistPrefix = `Snapshot framing ${Date.now()}`;
+  const chatMessages = Array.from({ length: 20 }, (_, index) =>
+    `${String(index + 1).padStart(2, "0")} ${"bounded snapshot chat ".repeat(13)}`.slice(0, 300),
+  );
+  try {
+    await host.goto(`${runtime.hostUrl}&autobroadcast=0`);
+    await expect(host.getByRole("heading", { name: "Zuradio", exact: true })).toBeVisible();
+    await host.evaluate(() => fetch("/api/v1/broadcast/stop", { method: "POST" }));
+    await host.goto(`${runtime.hostUrl.split("#")[0]}#autobroadcast=0`);
+    const snapshotBytes = await host.evaluate(async ({ messages, prefix }) => {
+      const action = async (nextAction: Record<string, unknown>) => {
+        const response = await fetch("/api/v1/action", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            protocol: 1,
+            commandId: crypto.randomUUID(),
+            expectedRevision: null,
+            actor: { role: "local", peerId: null },
+            action: nextAction,
+          }),
+        });
+        if (!response.ok) throw new Error(`Could not seed large snapshot (${response.status})`);
+      };
+      await action({ kind: "chat_clear" });
+      for (const text of messages) await action({ kind: "chat_post", text });
+      for (let index = 0; index < 40; index += 1) {
+        await action({ kind: "playlist_create", name: `${prefix} ${String(index).padStart(2, "0")} ${"x".repeat(28)}` });
+      }
+      const snapshot = await fetch("/api/v1/snapshot", { cache: "no-store" }).then((response) => response.json());
+      return new TextEncoder().encode(JSON.stringify(snapshot)).length;
+    }, { messages: chatMessages, prefix: playlistPrefix });
+    expect(snapshotBytes).toBeGreaterThan(16_384);
+
+    await host.getByRole("button", { name: /Broadcast/ }).click();
+    await host.getByTestId("start-broadcast").click();
+    await expect(host.getByTestId("stop-broadcast")).toBeVisible({ timeout: 35_000 });
+    await controller.goto(companionBase);
+    await controller.getByTestId("connect-control").click();
+    await controller.getByTestId("password").fill(password);
+    const connectedAt = Date.now();
+    await controller.getByTestId("connect").click();
+    await expect(controller.getByText("Controller connected", { exact: true })).toBeVisible({ timeout: 45_000 });
+    expect(Date.now() - connectedAt, "chunked controller snapshot connection latency").toBeLessThan(
+      MAX_CONNECT_LATENCY_MS,
+    );
+    await expect(controller.locator(".controller-panel .track-row")).toHaveCount(initialTrackCount);
+    await controller.getByRole("button", { name: "Chat", exact: true }).click();
+    await expect(controller.getByTestId("chat-message")).toHaveCount(chatMessages.length);
+    await expect(controller.getByTestId("remote-chat").getByText(chatMessages.at(-1) ?? "", { exact: true })).toBeVisible();
+  } finally {
+    await host.evaluate(async (prefix) => {
+      const snapshot = await fetch("/api/v1/snapshot", { cache: "no-store" }).then((response) => response.json());
+      const actions = [
+        { kind: "chat_clear" },
+        ...snapshot.playlists
+          .filter((playlist: { name?: unknown }) => typeof playlist.name === "string" && playlist.name.startsWith(prefix))
+          .map((playlist: { id: string }) => ({ kind: "playlist_delete", playlistId: playlist.id })),
+      ];
+      for (const action of actions) {
+        await fetch("/api/v1/action", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            protocol: 1,
+            commandId: crypto.randomUUID(),
+            expectedRevision: null,
+            actor: { role: "local", peerId: null },
+            action,
+          }),
+        });
+      }
+      await fetch("/api/v1/broadcast/stop", { method: "POST" });
+    }, playlistPrefix).catch(() => undefined);
+    await controllerContext.close().catch(() => undefined);
+    await host.close().catch(() => undefined);
+  }
+});
+
 function watch(page: Page, label: string, errors: string[]): void {
   page.on("pageerror", (error) => errors.push(`${label}: ${error.message}`));
   page.on("console", (message) => {

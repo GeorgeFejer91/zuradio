@@ -9,6 +9,31 @@ complete CLI, dedicated Chromium WebRTC app window, least-privilege Tauri
 fallback, Debian package, AppImage, and public Web Companion. Native packages remain unsigned, and physical-phone,
 forced-TURN, and endurance qualification remain release-channel gates.
 
+### 2026-09-03 transfer visibility, resume, and large-catalogue addendum
+
+- Upload mode now keeps a visible transfer panel on both the laptop and Web
+  Companion. It reports the receiver stage, current and overall progress,
+  acknowledged bytes, speed, ETA, file count, catalogued count, and a retained
+  completion or interruption result. The external browser CLI emits the same
+  bounded milestones on stderr while reserving stdout for its final JSON.
+- Catalogue manifests now use receiver-confirmed SHA-256 acknowledgements in a
+  synced append-only JSONL ledger. An interruption test imported the first of
+  two real files, deliberately failed the second, and proved that the retry
+  selected and transmitted only the unacknowledged hash.
+- A real installed-catalogue defect was found before the 9,088-file transfer:
+  the eight-track snapshot plus coordination chat was 18,810 bytes and was
+  correctly rejected by the existing 16,384-byte message parser. Authenticated
+  Control peers now negotiate ordered 11 KiB snapshot framing, bounded to 64
+  MiB and 30 seconds, and become ready only after exact reassembly.
+- The final staged benchmark was byte-exact for 9,729,283 source bytes: first
+  catalogue publication in 2,174 ms, asynchronous recognition in 5,383 ms,
+  upload at 1,815,165 B/s, download at 42,485,952 B/s, and two originals in the
+  visible organized library.
+- The subsequent unfiltered feature gate passed all 27 tests in 4.3 minutes,
+  including a real WebRTC controller snapshot above 16 KiB in 10.6 seconds,
+  transfer progress, receiver-first error reporting, manifest resume, Chromium,
+  Firefox, and WebKit compatibility.
+
 ### 2026-09-03 authenticated-chat addendum
 
 - Zuradio now includes a persistent text chat between the laptop UI and
