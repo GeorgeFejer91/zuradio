@@ -56,11 +56,13 @@ async function upload(options) {
     const browserErrors = [];
     page.on("pageerror", (event) => browserErrors.push(event.message));
     await page.goto(publicUrl, { waitUntil: "domcontentloaded", timeout: options.timeoutMs });
+    process.stderr.write(`[${new Date().toISOString()}] companion loaded\n`);
     await page.getByTestId("connect-upload").click();
     await page.getByTestId("password").fill(password);
     await page.getByTestId("connect").click();
     try {
       await page.getByText("Upload connected", { exact: true }).waitFor({ timeout: options.timeoutMs });
+      process.stderr.write(`[${new Date().toISOString()}] upload bridge connected\n`);
     } catch (error) {
       const alert = await page.getByRole("alert").textContent().catch(() => "");
       throw new Error(alert?.trim() || browserErrors.at(-1) || messageOf(error));
@@ -73,11 +75,14 @@ async function upload(options) {
     if (!Number.isSafeInteger(selectedCount) || selectedCount < 1) {
       throw new Error("the selected path contains no supported audio files");
     }
+    process.stderr.write(`[${new Date().toISOString()}] selected ${selectedCount} file(s)\n`);
 
     await page.getByTestId("upload").click();
+    process.stderr.write(`[${new Date().toISOString()}] upload started\n`);
     const completion = page.getByTestId("upload-progress").filter({ hasText: /tracks? added to the laptop library/i });
     await completion.waitFor({ timeout: options.timeoutMs });
     const completionText = (await completion.textContent())?.trim() ?? "";
+    process.stderr.write(`[${new Date().toISOString()}] upload completed\n`);
     const imported = await page.locator(".imported-list li").evaluateAll((items) =>
       items.map((item) => ({
         title: item.querySelector("strong")?.textContent?.trim() ?? "",

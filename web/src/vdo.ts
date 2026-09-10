@@ -17,6 +17,7 @@ const HOST = "wss://wss.vdo.ninja";
 const SALT = "vdo.ninja";
 const MAX_MESSAGE_BYTES = 16_384;
 const UPLOAD_CHUNK_BYTES = 8 * 1024;
+const UPLOAD_CHUNKS_IN_FLIGHT = 4;
 const MAX_UPLOAD_FILES = 512;
 const MAX_UPLOAD_FILE_BYTES = 512 * 1024 * 1024;
 const MAX_RENDEZVOUS_PEERS = 16;
@@ -656,22 +657,35 @@ export class CompanionBridge {
         if (!entry) continue;
         const bytes = new Uint8Array(await entry.file.arrayBuffer());
         const digest = encodeHex(new Uint8Array(await crypto.subtle.digest("SHA-256", bytes)));
-        for (let offset = 0; offset < bytes.length; offset += UPLOAD_CHUNK_BYTES) {
-          const chunk = bytes.subarray(offset, Math.min(bytes.length, offset + UPLOAD_CHUNK_BYTES));
-          await this.sendUpload({
-            kind: "chunk",
-            transferId,
-            fileId: entry.fileId,
-            offset,
-            data: encodeBase64(chunk),
-          });
-          onProgress({
-            fileName: entry.relativePath,
-            fileIndex,
-            fileCount: entries.length,
-            fileReceived: offset + chunk.length,
-            fileSize: bytes.length,
-          });
+        for (
+          let windowOffset = 0;
+          windowOffset < bytes.length;
+          windowOffset += UPLOAD_CHUNK_BYTES * UPLOAD_CHUNKS_IN_FLIGHT
+        ) {
+          const sends: Promise<void>[] = [];
+          for (let slot = 0; slot < UPLOAD_CHUNKS_IN_FLIGHT; slot += 1) {
+            const offset = windowOffset + slot * UPLOAD_CHUNK_BYTES;
+            if (offset >= bytes.length) break;
+            const chunk = bytes.subarray(offset, Math.min(bytes.length, offset + UPLOAD_CHUNK_BYTES));
+            sends.push(
+              this.sendUpload({
+                kind: "chunk",
+                transferId,
+                fileId: entry.fileId,
+                offset,
+                data: encodeBase64(chunk),
+              }).then(() => {
+                onProgress({
+                  fileName: entry.relativePath,
+                  fileIndex,
+                  fileCount: entries.length,
+                  fileReceived: offset + chunk.length,
+                  fileSize: bytes.length,
+                });
+              }),
+            );
+          }
+          await Promise.all(sends);
         }
         await this.sendUpload({
           kind: "finish_file",
