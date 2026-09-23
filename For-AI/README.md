@@ -18,3 +18,6 @@ This is the mandatory first read for Zuradio. It keeps the control plane small a
 - Read [TRANSPORT-SELECTION-TASK.md](./TRANSPORT-SELECTION-TASK.md) for transport decisions.
 - Read [DATA-TRANSFER-GATE.md](./DATA-TRANSFER-GATE.md) for data-transfer work.
 - Do not add another document unless none of these owners can hold a current, durable rule.
+## HTML UI skill route
+
+For new or changed text-bearing HTML/CSS in the local player or browser companion, load [`uncodixfy-pretext`](https://github.com/GeorgeFejer91/uncodixfy-pretext/blob/main/SKILL.md) and its Pretext reference. It nests Ponytail and original Uncodixfy aesthetics. Preserve Zuradio's laptop-first authority and low-latency interaction; implement real Pretext measurement for bounded text on the touched UI, with readable reflow or an explicit no-fit outcome. Verify rendered narrow/phone layout, 320 CSS px reflow, 200% text/zoom, and long labels under `VERIFICATION-GATE.md` when behavior changes. This documentation route does not claim existing screens have already passed that matrix.
